@@ -544,6 +544,8 @@ tarantool_free(void)
 	if (!cord_is_main())
 		return;
 
+	box_run_on_shutdown_triggers();
+
 	/* Shutdown worker pool. Waits until threads terminate. */
 	coio_shutdown();
 

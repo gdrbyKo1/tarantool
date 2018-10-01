@@ -584,15 +584,16 @@ tuple_field_go_to_path(const char **data, const char *path, uint32_t path_len)
 	struct json_token token;
 	json_lexer_create(&lexer, path, path_len);
 	while ((rc = json_lexer_next_token(&lexer, &token)) == 0) {
-		switch (token.type) {
+		switch (token.key.type) {
 		case JSON_TOKEN_NUM:
-			rc = tuple_field_go_to_index(data, token.num);
+			rc = tuple_field_go_to_index(data, token.key.num);
 			break;
 		case JSON_TOKEN_STR:
-			rc = tuple_field_go_to_key(data, token.str, token.len);
+			rc = tuple_field_go_to_key(data, token.key.str,
+						   token.key.len);
 			break;
 		default:
-			assert(token.type == JSON_TOKEN_END);
+			assert(token.key.type == JSON_TOKEN_END);
 			return 0;
 		}
 		if (rc != 0) {
@@ -628,9 +629,9 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 	int rc = json_lexer_next_token(&lexer, &token);
 	if (rc != 0)
 		goto error;
-	switch(token.type) {
+	switch(token.key.type) {
 	case JSON_TOKEN_NUM: {
-		int index = token.num;
+		int index = token.key.num;
 		if (index == 0) {
 			*field = NULL;
 			return 0;
@@ -644,7 +645,7 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 	case JSON_TOKEN_STR: {
 		/* First part of a path is a field name. */
 		uint32_t name_hash;
-		if (path_len == (uint32_t) token.len) {
+		if (path_len == (uint32_t) token.key.len) {
 			name_hash = path_hash;
 		} else {
 			/*
@@ -653,17 +654,18 @@ tuple_field_raw_by_path(struct tuple_format *format, const char *tuple,
 			 * used. A tuple dictionary hashes only
 			 * name, not path.
 			 */
-			name_hash = field_name_hash(token.str, token.len);
+			name_hash = field_name_hash(token.key.str,
+						    token.key.len);
 		}
 		*field = tuple_field_raw_by_name(format, tuple, field_map,
-						 token.str, token.len,
+						 token.key.str, token.key.len,
 						 name_hash);
 		if (*field == NULL)
 			return 0;
 		break;
 	}
 	default:
-		assert(token.type == JSON_TOKEN_END);
+		assert(token.key.type == JSON_TOKEN_END);
 		*field = NULL;
 		return 0;
 	}

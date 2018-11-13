@@ -52,6 +52,7 @@
 #include "identifier.h"
 #include "version.h"
 #include "sequence.h"
+#include "lua/call.h"
 
 /**
  * chap-sha1 of empty string, i.e.
@@ -248,7 +249,7 @@ index_opts_decode(struct index_opts *opts, const char *map)
 {
 	index_opts_create(opts);
 	if (opts_decode(opts, index_opts_reg, &map, ER_WRONG_INDEX_OPTIONS,
-			BOX_INDEX_FIELD_OPTS, NULL) != 0)
+			BOX_INDEX_FIELD_OPTS, &fiber()->gc) != 0)
 		diag_raise();
 	if (opts->distance == rtree_index_distance_type_MAX) {
 		tnt_raise(ClientError, ER_WRONG_INDEX_OPTIONS,
@@ -363,7 +364,13 @@ index_def_new_from_tuple(struct tuple *tuple, struct space *space)
 					     space->def->field_count) != 0)
 			diag_raise();
 	}
-	key_def = key_def_new(part_def, part_count);
+	if (opts.func_code != NULL) {
+		struct index *index = space_index(space, 0);
+		assert(index != NULL);
+		key_def = key_def_dup(index->def->key_def);
+	} else {
+		key_def = key_def_new(part_def, part_count);
+	}
 	if (key_def == NULL)
 		diag_raise();
 	struct index_def *index_def =
@@ -1407,6 +1414,46 @@ UpdateSchemaVersion::alter(struct alter_space *alter)
     ++schema_version;
 }
 
+class PrepareFunctionalIndex: public AlterSpaceOp
+{
+public:
+	PrepareFunctionalIndex(struct alter_space * alter, uint32_t iid)
+		:AlterSpaceOp(alter), iid(iid), func_ref(0) {}
+	virtual ~PrepareFunctionalIndex();
+	virtual void prepare(struct alter_space *alter);
+	virtual void commit(struct alter_space *alter, int64_t signature);
+	/** New index id. */
+	uint32_t iid;
+	/** Functional index extractor routine reference. */
+	int32_t func_ref;
+};
+
+PrepareFunctionalIndex::~PrepareFunctionalIndex()
+{
+	if (func_ref != 0)
+		lua_func_delete(func_ref);
+}
+
+void
+PrepareFunctionalIndex::prepare(struct alter_space *alter)
+{
+	struct index *new_index = space_index(alter->new_space, iid);
+	assert(index_is_functional(new_index->def));
+	if (lua_func_new(new_index->def->opts.func_code, &func_ref) != 0)
+		diag_raise();
+}
+
+void
+PrepareFunctionalIndex::commit(struct alter_space *alter, int64_t signature)
+{
+	(void)signature;
+	struct index *index = space_index(alter->new_space, iid);
+	index->func_ref = func_ref;
+	lua_func_idx_trigger_set(space_name(alter->new_space),
+				 index->def->name, &index->func_trigger_ref);
+	func_ref = 0;
+}
+
 /* }}} */
 
 /**
@@ -1849,12 +1896,15 @@ on_replace_dd_index(struct trigger * /* trigger */, void *event)
 	}
 	/* Case 2: create an index, if it is simply created. */
 	if (old_index == NULL && new_tuple != NULL) {
+		struct index_def *index_def =
+			index_def_new_from_tuple(new_tuple, old_space);
 		alter_space_move_indexes(alter, 0, iid);
 		CreateIndex *create_index = new CreateIndex(alter);
-		create_index->new_index_def =
-			index_def_new_from_tuple(new_tuple, old_space);
+		create_index->new_index_def = index_def;
 		index_def_update_optionality(create_index->new_index_def,
 					     alter->new_min_field_count);
+		if (index_is_functional(index_def))
+			(void)new PrepareFunctionalIndex(alter, iid);
 	}
 	/* Case 3 and 4: check if we need to rebuild index data. */
 	if (old_index != NULL && new_tuple != NULL) {
@@ -1862,6 +1912,11 @@ on_replace_dd_index(struct trigger * /* trigger */, void *event)
 		index_def = index_def_new_from_tuple(new_tuple, old_space);
 		auto index_def_guard =
 			make_scoped_guard([=] { index_def_delete(index_def); });
+		if (index_is_functional(index_def)) {
+			tnt_raise(ClientError, ER_ALTER_SPACE,
+				  space_name(old_space),
+				  "can not alter functional index");
+		}
 		/*
 		 * To detect which key parts are optional,
 		 * min_field_count is required. But

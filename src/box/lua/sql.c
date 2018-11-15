@@ -6,6 +6,8 @@
 #include "box/info.h"
 #include "lua/utils.h"
 #include "info.h"
+#include "box/execute.h"
+#include "box/vstream.h"
 
 static void
 lua_push_column_names(struct lua_State *L, struct sqlite3_stmt *stmt)
@@ -111,6 +113,39 @@ sqlerror:
 }
 
 static int
+lbox_execute(struct lua_State *L)
+{
+	struct sqlite3 *db = sql_get();
+	if (db == NULL)
+		return luaL_error(L, "not ready");
+
+	size_t length;
+	const char *sql = lua_tolstring(L, 1, &length);
+	if (sql == NULL)
+		return luaL_error(L, "usage: box.execute(sqlstring)");
+
+	struct sql_request request = {};
+	struct sql_response response = {};
+	request.sql_text = sql;
+	request.sql_text_len = length;
+	if (sql_prepare_and_execute(&request, &response, &fiber()->gc) != 0)
+		goto sqlerror;
+
+	int keys;
+	struct vstream vstream;
+	lua_vstream_init(&vstream, L);
+	lua_newtable(L);
+	if (sql_response_dump(&response, &keys, &vstream) != 0) {
+		lua_pop(L, 1);
+		goto sqlerror;
+	}
+	return 1;
+sqlerror:
+	lua_pushstring(L, sqlite3_errmsg(db));
+	return lua_error(L);
+}
+
+static int
 lua_sql_debug(struct lua_State *L)
 {
 	struct info_handler info;
@@ -124,6 +159,7 @@ box_lua_sqlite_init(struct lua_State *L)
 {
 	static const struct luaL_Reg module_funcs [] = {
 		{"execute", lua_sql_execute},
+		{"new_execute", lbox_execute},
 		{"debug", lua_sql_debug},
 		{NULL, NULL}
 	};

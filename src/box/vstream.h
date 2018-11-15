@@ -80,6 +80,9 @@ struct vstream {
 void
 mp_vstream_init(struct vstream *vstream, struct mpstream *mpstream);
 
+void
+lua_vstream_init(struct vstream *vstream, struct lua_State *L);
+
 static inline void
 vstream_encode_array(struct vstream *stream, uint32_t size)
 {

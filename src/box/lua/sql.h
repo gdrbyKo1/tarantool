@@ -36,8 +36,12 @@ extern "C" {
 #endif
 
 struct lua_State;
+struct luastream;
 
 void box_lua_sqlite_init(struct lua_State *L);
+
+void
+luastream_init(struct luastream *stream, struct lua_State *L);
 
 #ifdef __cplusplus
 }

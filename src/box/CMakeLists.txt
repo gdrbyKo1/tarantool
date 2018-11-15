@@ -138,6 +138,7 @@ add_library(box STATIC
     lua/session.c
     lua/net_box.c
     lua/xlog.c
+    lua/luastream.c
     lua/sql.c
     ${bin_sources})
 

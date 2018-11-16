@@ -247,10 +247,17 @@ cn:execute('drop table test')
 
 cn:close()
 
+-- gh-3505: Remove box.sql.execute
+cn = remote.connect(box.cfg.listen)
+
+-- Segmentation fault when EXPLAIN executed using net.box.
+_ = cn:execute("EXPLAIN SELECT 1;")
+
+cn:close()
+
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')
 box.schema.user.revoke('guest', 'create', 'space')
 space = nil
 
 -- Cleanup xlog
 box.snapshot()
-

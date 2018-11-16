@@ -468,15 +468,18 @@ sql_get_description(struct sqlite3_stmt *stmt, struct vstream *stream,
 		 * column_name simply returns them.
 		 */
 		assert(name != NULL);
-		vstream_encode_map(stream, 2);
+		int map_size = (type == NULL) ? 1 : 2;
+		vstream_encode_map(stream, map_size);
 
 		vstream_encode_enum(stream, IPROTO_FIELD_NAME, "name");
 		vstream_encode_str(stream, name);
 		vstream_encode_map_commit(stream);
 
-		vstream_encode_enum(stream, IPROTO_FIELD_TYPE, "type");
-		vstream_encode_str(stream, type);
-		vstream_encode_map_commit(stream);
+		if (map_size == 2) {
+			vstream_encode_enum(stream, IPROTO_FIELD_TYPE, "type");
+			vstream_encode_str(stream, type);
+			vstream_encode_map_commit(stream);
+		}
 
 		vstream_encode_array_commit(stream, i);
 	}

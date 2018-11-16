@@ -253,6 +253,10 @@ cn = remote.connect(box.cfg.listen)
 -- Segmentation fault when EXPLAIN executed using net.box.
 _ = cn:execute("EXPLAIN SELECT 1;")
 
+-- SELECT from system spaces returns unpacked msgpack.
+res = cn:execute('select "format" from "_space" limit 1;')
+res.rows
+
 cn:close()
 
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')

@@ -147,7 +147,8 @@ sql_bind_list_decode(struct sql_request *request, const char *data,
  */
 int
 sql_prepare_and_execute(const struct sql_request *request,
-			struct sql_response *response, struct region *region);
+			struct sql_response *response, struct region *region,
+			int error_id);
 
 #if defined(__cplusplus)
 } /* extern "C" { */

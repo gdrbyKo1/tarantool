@@ -247,10 +247,27 @@ cn:execute('drop table test')
 
 cn:close()
 
+--
+-- Some commands, e.g. EXPLAIN, could lead to segfault because it
+-- does not send column data type, but looks like DQL. Netbox had
+-- been trying to decode type for any DQL.
+--
+cn = remote.connect(box.cfg.listen)
+
+-- Segmentation fault when EXPLAIN executed using net.box.
+_ = cn:execute("EXPLAIN SELECT 1;")
+
+-- Segmentation fault when PRAGMA TABLE_INFO() executed using
+-- net.box.
+box.sql.execute('CREATE TABLE test (id INT PRIMARY KEY)')
+cn:execute("PRAGMA TABLE_INFO(test);")
+box.sql.execute('DROP TABLE test')
+
+cn:close()
+
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')
 box.schema.user.revoke('guest', 'create', 'space')
 space = nil
 
 -- Cleanup xlog
 box.snapshot()
-

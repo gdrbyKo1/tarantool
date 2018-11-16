@@ -540,6 +540,8 @@ sql_get_description(struct sqlite3_stmt *stmt, struct obuf *out,
 		 * column_name simply returns them.
 		 */
 		assert(name != NULL);
+		if (type == NULL)
+			type = "UNKNOWN";
 		size += mp_sizeof_str(strlen(name));
 		size += mp_sizeof_str(strlen(type));
 		char *pos = (char *) obuf_alloc(out, size);

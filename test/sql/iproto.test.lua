@@ -263,6 +263,15 @@ box.sql.execute('CREATE TABLE test (id INT PRIMARY KEY)')
 cn:execute("PRAGMA TABLE_INFO(test);")
 box.sql.execute('DROP TABLE test')
 
+-- SELECT returns unpacked msgpack.
+format = {{name = 'id', type = 'integer'}, {name = 'x', type = 'any'}}
+s = box.schema.space.create('test', {format=format})
+i1 = s:create_index('i1', {parts = {1, 'int'}})
+s:insert({1, {1,2,3}})
+s:insert({2, {a = 3}})
+cn:execute('select * from "test"')
+s:drop()
+
 cn:close()
 
 box.schema.user.revoke('guest', 'read,write,execute', 'universe')

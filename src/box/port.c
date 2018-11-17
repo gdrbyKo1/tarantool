@@ -36,6 +36,8 @@
 #include <small/mempool.h>
 #include <fiber.h>
 #include "errinj.h"
+#include "lua/utils.h"
+#include "lua/tuple.h"
 
 static struct mempool port_tuple_entry_pool;
 
@@ -121,6 +123,19 @@ port_tuple_dump_msgpack(struct port *base, struct obuf *out)
 	return 1;
 }
 
+static int
+port_tuple_dump_lua(struct port *base, struct lua_State *L)
+{
+	struct port_tuple *port = port_tuple(base);
+	struct port_tuple_entry *pe;
+	int i = 0;
+	for (pe = port->first; pe != NULL; pe = pe->next) {
+		luaT_pushtuple(L, pe->tuple);
+		lua_rawseti(L, -2, ++i);
+	}
+	return port->size;
+}
+
 void
 port_destroy(struct port *port)
 {
@@ -137,6 +152,12 @@ int
 port_dump_msgpack_16(struct port *port, struct obuf *out)
 {
 	return port->vtab->dump_msgpack_16(port, out);
+}
+
+int
+port_dump_lua(struct port *port, struct lua_State *L)
+{
+	return port->vtab->dump_lua(port, L);
 }
 
 const char *
@@ -161,6 +182,7 @@ port_free(void)
 const struct port_vtab port_tuple_vtab = {
 	.dump_msgpack = port_tuple_dump_msgpack,
 	.dump_msgpack_16 = port_tuple_dump_msgpack_16,
+	.dump_lua = port_tuple_dump_lua,
 	.dump_plain = NULL,
 	.destroy = port_tuple_destroy,
 };

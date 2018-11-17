@@ -78,6 +78,11 @@ struct port_vtab {
 	 */
 	int (*dump_msgpack_16)(struct port *port, struct obuf *out);
 	/**
+	 * Dump the content of a port to Lua stack.
+	 * On success returns number of entries dumped.
+	 */
+	int (*dump_lua)(struct port *port, struct lua_State *L);
+	/**
 	 * Dump a port content as a plain text into a buffer,
 	 * allocated inside.
 	 */
@@ -183,6 +188,13 @@ port_dump_msgpack(struct port *port, struct obuf *out);
  */
 int
 port_dump_msgpack_16(struct port *port, struct obuf *out);
+
+/**
+ * Same as port_dump(), but use the legacy Tarantool 1.6
+ * format.
+ */
+int
+port_dump_lua(struct port *port, struct lua_State *L);
 
 /**
  * Dump a port content as a plain text into a buffer,

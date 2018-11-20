@@ -342,3 +342,17 @@ rows == expected_rows
 lsn == expected_lsn
 box.cfg{too_long_threshold = too_long_threshold}
 s:drop()
+
+--
+-- gh-1607: on_shutdown triggers.
+--
+f = function() print('on_shutdown 1') end
+g = function() print('on_shutdown 2') end
+h = function() print('on_shutdown 3') end
+_ = box.ctl.on_shutdown(f)
+_ = box.ctl.on_shutdown(g)
+_ = box.ctl.on_shutdown(h, g)
+test_run:cmd('restart server default')
+test_run:grep_log('default', 'on_shutdown 1', nil, {noreset=true})
+test_run:grep_log('default', 'on_shutdown 2', nil, {noreset=true})
+test_run:grep_log('default', 'on_shutdown 3', nil, {noreset=true})

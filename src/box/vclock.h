@@ -271,7 +271,8 @@ vclock_compare(const struct vclock *a, const struct vclock *b)
  * @brief vclockset - a set of vclocks
  */
 typedef rb_tree(struct vclock) vclockset_t;
-rb_proto(, vclockset_, vclockset_t, struct vclock);
+rb_proto_ext_key(, vclockset_, vclockset_t, struct vclock,
+		 const struct vclock *);
 
 /**
  * A proximity search in a set of vclock objects.
@@ -283,7 +284,7 @@ rb_proto(, vclockset_, vclockset_t, struct vclock);
  * @return a vclock that <= than \a key
  */
 static inline struct vclock *
-vclockset_match(vclockset_t *set, struct vclock *key)
+vclockset_match(vclockset_t *set, const struct vclock *key)
 {
 	struct vclock *match = vclockset_psearch(set, key);
 	/**

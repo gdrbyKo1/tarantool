@@ -206,4 +206,6 @@ vclockset_node_compare(const struct vclock *a, const struct vclock *b)
 	return res;
 }
 
-rb_gen(, vclockset_, vclockset_t, struct vclock, link, vclockset_node_compare);
+rb_gen_ext_key(, vclockset_, vclockset_t, struct vclock, link,
+	       vclockset_node_compare, const struct vclock *,
+	       vclockset_node_compare);

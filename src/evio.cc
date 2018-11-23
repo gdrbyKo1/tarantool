@@ -294,10 +294,7 @@ evio_service_listen(struct evio_service *service)
 		  sio_strfaddr(&service->addr, service->addr_len));
 
 	int fd = service->ev.fd;
-	if (sio_listen(fd)) {
-		/* raise for addr in use to */
-		tnt_raise(SocketError, sio_socketname(fd), "listen");
-	}
+	sio_listen(fd);
 	ev_io_start(service->loop, &service->ev);
 }
 

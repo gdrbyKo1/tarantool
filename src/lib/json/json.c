@@ -507,3 +507,31 @@ json_tree_postorder_next(struct json_token *root, struct json_token *pos)
 	}
 	return pos->parent != root ? pos->parent : NULL;
 }
+
+int
+json_path_cmp(const char *a, uint32_t a_len, const char *b, uint32_t b_len)
+{
+	struct json_lexer lexer_a, lexer_b;
+	json_lexer_create(&lexer_a, a, a_len);
+	json_lexer_create(&lexer_b, b, b_len);
+	struct json_token token_a, token_b;
+	int rc_a, rc_b;
+	while ((rc_a = json_lexer_next_token(&lexer_a, &token_a)) == 0 &&
+		(rc_b = json_lexer_next_token(&lexer_b, &token_b)) == 0 &&
+		token_a.key.type != JSON_TOKEN_END &&
+		token_b.key.type != JSON_TOKEN_END) {
+		int rc = json_token_key_cmp(&token_a, &token_b);
+		if (rc != 0)
+			return rc;
+	}
+	/* Path "a" should be valid. */
+	assert(rc_a == 0);
+	if (rc_b != 0)
+		return rc_b;
+	/*
+	 * The parser stopped because the end of one of the paths
+	 * was reached. As JSON_TOKEN_END > JSON_TOKEN_{NUM, STR},
+	 * the path having more tokens has lower key.type value.
+	 */
+	return token_b.key.type - token_a.key.type;
+}

@@ -137,6 +137,17 @@ json_lexer_create(struct json_lexer *lexer, const char *src, int src_len)
 int
 json_lexer_next_token(struct json_lexer *lexer, struct json_token *token);
 
+/**
+ * Compare two JSON paths using Lexer class.
+ * - @a path must be valid
+ * - at the case of paths that have same token-sequence prefix,
+ *   the path having more tokens is assumed to be greater
+ * - when @b path contains an error, the path "a" is assumed to
+ *   be greater
+ */
+int
+json_path_cmp(const char *a, uint32_t a_len, const char *b, uint32_t b_len);
+
 /** Create a JSON tree object to manage data relations. */
 int
 json_tree_create(struct json_tree *tree);

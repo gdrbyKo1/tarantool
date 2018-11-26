@@ -1137,13 +1137,6 @@ wal_watcher_notify(struct wal_watcher *watcher, unsigned events)
 	assert(!rlist_empty(&watcher->next));
 
 	struct wal_watcher_msg *msg = &watcher->msg;
-
-	events &= watcher->event_mask;
-	if (events == 0) {
-		/* The watcher isn't interested in this event. */
-		return;
-	}
-
 	if (msg->cmsg.route != NULL) {
 		/*
 		 * If the notification message is still en route,
@@ -1163,7 +1156,10 @@ static void
 wal_watcher_notify_perform(struct cmsg *cmsg)
 {
 	struct wal_watcher_msg *msg = (struct wal_watcher_msg *) cmsg;
-	msg->watcher->cb(msg);
+	struct wal_watcher *watcher = msg->watcher;
+	unsigned events = msg->events;
+
+	watcher->cb(watcher, events);
 }
 
 static void
@@ -1216,9 +1212,8 @@ wal_watcher_detach(void *arg)
 
 void
 wal_set_watcher(struct wal_watcher *watcher, const char *name,
-		void (*watcher_cb)(struct wal_watcher_msg *),
-		void (*process_cb)(struct cbus_endpoint *),
-		unsigned event_mask)
+		void (*watcher_cb)(struct wal_watcher *, unsigned events),
+		void (*process_cb)(struct cbus_endpoint *))
 {
 	assert(journal_is_initialized(&wal_writer_singleton.base));
 
@@ -1228,7 +1223,6 @@ wal_set_watcher(struct wal_watcher *watcher, const char *name,
 	watcher->msg.events = 0;
 	watcher->msg.cmsg.route = NULL;
 	watcher->pending_events = 0;
-	watcher->event_mask = event_mask;
 
 	assert(lengthof(watcher->route) == 2);
 	watcher->route[0] = (struct cmsg_hop)
@@ -1249,15 +1243,6 @@ wal_clear_watcher(struct wal_watcher *watcher,
 		    wal_watcher_detach, watcher, process_cb);
 }
 
-/**
- * Notify all interested watchers about a WAL event.
- *
- * XXX: Note, this function iterates over all registered watchers,
- * including those that are not interested in the given event.
- * This is OK only as long as the number of events/watchers is
- * small. If this ever changes, we should consider maintaining
- * a separate watcher list per each event type.
- */
 static void
 wal_notify_watchers(struct wal_writer *writer, unsigned events)
 {

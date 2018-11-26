@@ -83,9 +83,10 @@ box_free(void);
 
 /**
  * Run on_shutdown triggers.
+ * \param sig signal which caused termination.
  */
 void
-box_run_on_shutdown_triggers(void);
+box_run_on_shutdown_triggers(int sig);
 
 /**
  * Load configuration for box library.

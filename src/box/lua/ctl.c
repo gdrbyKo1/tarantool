@@ -65,15 +65,17 @@ lbox_ctl_wait_rw(struct lua_State *L)
 	return 0;
 }
 
-/*
- * This is a placeholder. It will be used when we decide to pass
- * a signal which caused termination to the trigger.
+/**
+ * Push a signal which caused termination on lua stack
+ * to be used by on_shutdown triggers.
  */
 static int
 lbox_push_on_shutdown(struct lua_State *L, void *event)
 {
-	(void)L;
-	(void)event;
+	if (event != NULL) {
+		lua_pushinteger(L, *(int *)event);
+		return 1;
+	}
 	return 0;
 }
 

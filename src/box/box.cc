@@ -1648,9 +1648,9 @@ box_set_replicaset_uuid(const struct tt_uuid *replicaset_uuid)
 }
 
 void
-box_run_on_shutdown_triggers(void)
+box_run_on_shutdown_triggers(int sig)
 {
-	trigger_run(&on_shutdown, NULL);
+	trigger_run(&on_shutdown, sig != 0 ? &sig : NULL);
 }
 
 void

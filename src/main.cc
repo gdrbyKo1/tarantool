@@ -89,6 +89,12 @@ static const int ev_sig_count = sizeof(ev_sigs)/sizeof(*ev_sigs);
 
 static double start_time;
 
+/**
+ * The signal which caused termination to be passed
+ * to on_shutdown triggers.
+ */
+static int caught_sig = 0;
+
 double
 tarantool_uptime(void)
 {
@@ -113,7 +119,6 @@ sig_checkpoint(ev_loop * /* loop */, struct ev_signal * /* w */,
 static void
 signal_cb(ev_loop *loop, struct ev_signal *w, int revents)
 {
-	(void) w;
 	(void) revents;
 
 	/**
@@ -125,6 +130,7 @@ signal_cb(ev_loop *loop, struct ev_signal *w, int revents)
 	 */
 	if (pid_file)
 		say_crit("got signal %d - %s", w->signum, strsignal(w->signum));
+	caught_sig = w->signum;
 	start_loop = false;
 	/* Terminate the main event loop */
 	ev_break(loop, EVBREAK_ALL);
@@ -544,7 +550,7 @@ tarantool_free(void)
 	if (!cord_is_main())
 		return;
 
-	box_run_on_shutdown_triggers();
+	box_run_on_shutdown_triggers(caught_sig);
 
 	/* Shutdown worker pool. Waits until threads terminate. */
 	coio_shutdown();

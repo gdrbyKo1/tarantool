@@ -52,13 +52,23 @@ extern int wal_dir_lock;
 extern "C" {
 #endif /* defined(__cplusplus) */
 
+/**
+ * Callback invoked on behalf of the tx thread upon request
+ * completion if the WAL thread ran out of disk space while
+ * performing a request and had to delete some old WAL files
+ * in order to continue. The vclock of the oldest WAL row
+ * still stored on the instance is returned in @vclock.
+ */
+typedef void (*wal_on_garbage_collection_f)(const struct vclock *vclock);
+
 void
 wal_thread_start();
 
 int
 wal_init(enum wal_mode wal_mode, const char *wal_dirname, int64_t wal_max_rows,
 	 int64_t wal_max_size, const struct tt_uuid *instance_uuid,
-	 const struct vclock *vclock, const struct vclock *checkpoint_vclock);
+	 const struct vclock *vclock, const struct vclock *checkpoint_vclock,
+	 wal_on_garbage_collection_f on_garbage_collection);
 
 void
 wal_thread_stop();
@@ -73,8 +83,6 @@ struct wal_watcher_msg {
 	struct wal_watcher *watcher;
 	/** Bit mask of events, see wal_event. */
 	unsigned events;
-	/** VClock of the oldest stored WAL row. */
-	struct vclock gc_vclock;
 };
 
 enum wal_event {
@@ -82,11 +90,6 @@ enum wal_event {
 	WAL_EVENT_WRITE		= (1 << 0),
 	/** A new WAL is created. */
 	WAL_EVENT_ROTATE	= (1 << 1),
-	/**
-	 * The WAL thread ran out of disk space and had to delete
-	 * one or more old WAL files.
-	 **/
-	WAL_EVENT_GC		= (1 << 2),
 };
 
 struct wal_watcher {

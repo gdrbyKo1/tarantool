@@ -91,6 +91,7 @@ struct wal_writer
 {
 	struct journal base;
 	/* ----------------- tx ------------------- */
+	wal_on_garbage_collection_f on_garbage_collection;
 	/**
 	 * The rollback queue. An accumulator for all requests
 	 * that need to be rolled back. Also acts as a valve
@@ -152,6 +153,17 @@ struct wal_msg {
 	 * be rolled back.
 	 */
 	struct stailq rollback;
+	/**
+	 * Set if the WAL thread ran out of disk space while
+	 * processing this request and had to delete some old
+	 * WAL files.
+	 */
+	bool gc_executed;
+	/**
+	 * VClock of the oldest WAL row available on the instance.
+	 * Initialized only if @gc_executed is set.
+	 */
+	struct vclock gc_vclock;
 };
 
 /**
@@ -188,6 +200,7 @@ wal_msg_create(struct wal_msg *batch)
 {
 	cmsg_init(&batch->base, wal_request_route);
 	batch->approx_len = 0;
+	batch->gc_executed = false;
 	stailq_create(&batch->commit);
 	stailq_create(&batch->rollback);
 }
@@ -254,6 +267,7 @@ tx_schedule_queue(struct stailq *queue)
 static void
 tx_schedule_commit(struct cmsg *msg)
 {
+	struct wal_writer *writer = &wal_writer_singleton;
 	struct wal_msg *batch = (struct wal_msg *) msg;
 	/*
 	 * Move the rollback list to the writer first, since
@@ -261,11 +275,13 @@ tx_schedule_commit(struct cmsg *msg)
 	 * iteration of tx_schedule_queue loop.
 	 */
 	if (! stailq_empty(&batch->rollback)) {
-		struct wal_writer *writer = &wal_writer_singleton;
 		/* Closes the input valve. */
 		stailq_concat(&writer->rollback, &batch->rollback);
 	}
 	tx_schedule_queue(&batch->commit);
+
+	if (batch->gc_executed)
+		writer->on_garbage_collection(&batch->gc_vclock);
 }
 
 static void
@@ -296,7 +312,8 @@ wal_writer_create(struct wal_writer *writer, enum wal_mode wal_mode,
 		  const char *wal_dirname, int64_t wal_max_rows,
 		  int64_t wal_max_size, const struct tt_uuid *instance_uuid,
 		  const struct vclock *vclock,
-		  const struct vclock *checkpoint_vclock)
+		  const struct vclock *checkpoint_vclock,
+		  wal_on_garbage_collection_f on_garbage_collection)
 {
 	writer->wal_mode = wal_mode;
 	writer->wal_max_rows = wal_max_rows;
@@ -315,6 +332,8 @@ wal_writer_create(struct wal_writer *writer, enum wal_mode wal_mode,
 	vclock_copy(&writer->vclock, vclock);
 	vclock_copy(&writer->checkpoint_vclock, checkpoint_vclock);
 	rlist_create(&writer->watchers);
+
+	writer->on_garbage_collection = on_garbage_collection;
 }
 
 /** Destroy a WAL writer structure. */
@@ -419,14 +438,15 @@ wal_open(struct wal_writer *writer)
 int
 wal_init(enum wal_mode wal_mode, const char *wal_dirname, int64_t wal_max_rows,
 	 int64_t wal_max_size, const struct tt_uuid *instance_uuid,
-	 const struct vclock *vclock, const struct vclock *checkpoint_vclock)
+	 const struct vclock *vclock, const struct vclock *checkpoint_vclock,
+	 wal_on_garbage_collection_f on_garbage_collection)
 {
 	assert(wal_max_rows > 1);
 
 	struct wal_writer *writer = &wal_writer_singleton;
 	wal_writer_create(writer, wal_mode, wal_dirname, wal_max_rows,
 			  wal_max_size, instance_uuid, vclock,
-			  checkpoint_vclock);
+			  checkpoint_vclock, on_garbage_collection);
 
 	/*
 	 * Scan the WAL directory to build an index of all
@@ -664,14 +684,14 @@ wal_opt_rotate(struct wal_writer *writer)
 }
 
 /**
- * Make sure there's enough disk space to append @len bytes
- * of data to the current WAL.
+ * Make sure there's enough disk space to process the given
+ * WAL message.
  *
  * If fallocate() fails with ENOSPC, delete old WAL files
  * that are not needed for recovery and retry.
  */
 static int
-wal_fallocate(struct wal_writer *writer, size_t len)
+wal_fallocate(struct wal_writer *writer, struct wal_msg *msg)
 {
 	bool warn_no_space = true;
 	struct xlog *l = &writer->current_wal;
@@ -688,7 +708,7 @@ wal_fallocate(struct wal_writer *writer, size_t len)
 	 * of encoded rows (compression, fixheaders). Double the
 	 * given length to get a rough upper bound estimate.
 	 */
-	len *= 2;
+	size_t len = msg->approx_len * 2;
 
 retry:
 	if (errinj == NULL || errinj->iparam == 0) {
@@ -722,7 +742,9 @@ retry:
 	}
 	diag_destroy(&diag);
 
-	wal_notify_watchers(writer, WAL_EVENT_GC);
+	msg->gc_executed = true;
+	if (xdir_first_vclock(&writer->wal_dir, &msg->gc_vclock) < 0)
+		vclock_copy(&msg->gc_vclock, &writer->vclock);
 	goto retry;
 error:
 	diag_log();
@@ -816,7 +838,7 @@ wal_write_to_disk(struct cmsg *msg)
 	}
 
 	/* Ensure there's enough disk space before writing anything. */
-	if (wal_fallocate(writer, wal_msg->approx_len) != 0) {
+	if (wal_fallocate(writer, wal_msg) != 0) {
 		stailq_concat(&wal_msg->rollback, &wal_msg->commit);
 		return wal_writer_begin_rollback(writer);
 	}
@@ -1115,7 +1137,6 @@ wal_watcher_notify(struct wal_watcher *watcher, unsigned events)
 	assert(!rlist_empty(&watcher->next));
 
 	struct wal_watcher_msg *msg = &watcher->msg;
-	struct wal_writer *writer = &wal_writer_singleton;
 
 	events &= watcher->event_mask;
 	if (events == 0) {
@@ -1134,9 +1155,6 @@ wal_watcher_notify(struct wal_watcher *watcher, unsigned events)
 	}
 
 	msg->events = events;
-	if (xdir_first_vclock(&writer->wal_dir, &msg->gc_vclock) < 0)
-		vclock_copy(&msg->gc_vclock, &writer->vclock);
-
 	cmsg_init(&msg->cmsg, watcher->route);
 	cpipe_push(&watcher->watcher_pipe, &msg->cmsg);
 }

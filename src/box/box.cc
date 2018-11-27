@@ -91,6 +91,22 @@ bool box_checkpoint_is_in_progress = false;
 const struct vclock *box_vclock = &replicaset.vclock;
 
 /**
+ * Fiber that performs periodic checkpointing.
+ */
+static struct fiber *checkpoint_daemon;
+
+/**
+ * Interval between checkpoints, in seconds.
+ */
+static double checkpoint_interval;
+
+/**
+ * Time of the next scheduled checkpoint that will be
+ * performed by the checkpoint daemon.
+ */
+static double next_checkpoint_time;
+
+/**
  * Set if backup is in progress, i.e. box_backup_start() was
  * called but box_backup_stop() hasn't been yet.
  */
@@ -359,6 +375,60 @@ apply_initial_join_row(struct xstream *stream, struct xrow_header *row)
 	struct space *space = space_cache_find_xc(request.space_id);
 	/* no access checks here - applier always works with admin privs */
 	space_apply_initial_join_row_xc(space, &request);
+}
+
+static int
+checkpoint_daemon_f(va_list ap)
+{
+	(void)ap;
+	assert(checkpoint_daemon == fiber());
+	while (!fiber_is_cancelled()) {
+		double now = ev_monotonic_now(loop());
+		if (now < next_checkpoint_time) {
+			fiber_sleep(next_checkpoint_time - now);
+			continue;
+		}
+		if (box_checkpoint_is_in_progress) {
+			/*
+			 * The next checkpoint will be scheduled
+			 * by the concurrent box_checkpoint().
+			 */
+			next_checkpoint_time = now + TIMEOUT_INFINITY;
+			continue;
+		}
+		box_checkpoint();
+	}
+	checkpoint_daemon = NULL;
+	return 0;
+}
+
+static void
+start_checkpoint_daemon(void)
+{
+	assert(checkpoint_daemon == NULL);
+	checkpoint_daemon = fiber_new("checkpoint_daemon", checkpoint_daemon_f);
+	if (checkpoint_daemon == NULL)
+		panic("failed to start checkpoint daemon");
+	next_checkpoint_time = ev_monotonic_now(loop()) + TIMEOUT_INFINITY;
+	fiber_wakeup(checkpoint_daemon);
+}
+
+static void
+schedule_next_checkpoint(double timeout)
+{
+	if (checkpoint_daemon == NULL)
+		return;
+
+	next_checkpoint_time = ev_monotonic_now(loop()) + timeout;
+	if (checkpoint_daemon != fiber())
+		fiber_wakeup(checkpoint_daemon);
+
+	char buf[128];
+	struct tm tm;
+	time_t time = (time_t)ev_now(loop()) + timeout;
+	localtime_r(&time, &tm);
+	strftime(buf, sizeof(buf), "%c", &tm);
+	say_info("scheduled next checkpoint for %s", buf);
 }
 
 /* {{{ configuration bindings */
@@ -841,6 +911,30 @@ box_set_readahead(void)
 	int readahead = cfg_geti("readahead");
 	box_check_readahead(readahead);
 	iproto_readahead = readahead;
+}
+
+void
+box_set_checkpoint_interval(void)
+{
+	checkpoint_interval = cfg_getd("checkpoint_interval");
+	if (checkpoint_interval > 0) {
+		/*
+		 * Add a random offset to the initial period to avoid
+		 * simultaneous checkpointing when multiple instances
+		 * are running on the same host.
+		 */
+		double timeout = checkpoint_interval +
+				rand() % ((int)checkpoint_interval + 1);
+		schedule_next_checkpoint(timeout);
+	} else {
+		/*
+		 * Effectively disable periodic checkpointing by
+		 * setting the next checkpoint time to a very large
+		 * value.
+		 */
+		next_checkpoint_time = ev_monotonic_now(loop()) +
+						TIMEOUT_INFINITY;
+	}
 }
 
 void
@@ -2141,6 +2235,7 @@ box_cfg_xc(void)
 	replicaset_follow();
 
 	sql_load_schema();
+	start_checkpoint_daemon();
 
 	fiber_gc();
 	is_box_configured = true;
@@ -2208,6 +2303,13 @@ end:
 
 	latch_unlock(&schema_lock);
 	box_checkpoint_is_in_progress = false;
+
+	/*
+	 * Schedule the next checkpoint if periodic checkpointing
+	 * is configured.
+	 */
+	if (checkpoint_interval > 0)
+		schedule_next_checkpoint(checkpoint_interval);
 
 	/*
 	 * Wait for background garbage collection that might

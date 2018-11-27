@@ -1039,11 +1039,10 @@ lbox_merger_new(struct lua_State *L)
 		throw_out_of_memory_error(L, sizeof(*merger), "merger");
 	}
 	merger->key_def = key_def_new(parts, count);
+	free(parts);
 	if (merger->key_def == NULL) {
-		free(parts);
 		return luaL_error(L, "Cannot create merger->key_def");
 	}
-	free(parts);
 
 	merger->format = box_tuple_format_new(&merger->key_def, 1);
 	if (merger->format == NULL) {

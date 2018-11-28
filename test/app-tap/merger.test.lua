@@ -372,11 +372,7 @@ local function run_merger_internal(context)
         end
     else
         -- Iterator output.
-        res = {}
-
-        for _, tuple in merger_inst:pairs() do
-            table.insert(res, tuple)
-        end
+        res = merger_inst:pairs():totable()
     end
 
     -- Prepare for comparing.

@@ -952,7 +952,7 @@ lbox_merger_next(struct lua_State *L)
 /**
  * Return three values:
  *
- * 1. gen (lbox_merger_next);
+ * 1. gen (lbox_merger_next wrapped by fun.wrap());
  * 2. param (merger);
  * 3. state (true).
  */
@@ -961,10 +961,13 @@ lbox_merger_ipairs(struct lua_State *L)
 {
 	if (lua_gettop(L) != 1 || check_merger(L, 1) == NULL)
 		return luaL_error(L, "Bad params, use: merger:ipairs()");
-	lua_pushvalue(L, -1);
+	luaL_loadstring(L, "return require('fun').wrap");
+	lua_call(L, 0, 1);
+	lua_insert(L, -2); /* Swap merger and wrap. */
 	lua_pushcfunction(L, lbox_merger_next);
-	lua_replace(L, -3);
+	lua_insert(L, -2); /* Swap merger and gen. */
 	lua_pushboolean(L, true);
+	lua_call(L, 3, 3);
 	return 3;
 }
 

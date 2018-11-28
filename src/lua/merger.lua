@@ -10,7 +10,7 @@ local methods = {
 }
 
 ffi.metatype(merger_t, {
-    __index = function(merger, key)
+    __index = function(self, key)
         return methods[key]
     end,
     -- Lua 5.2 compatibility

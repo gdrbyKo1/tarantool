@@ -28,91 +28,86 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
+#include "luastream.h"
 #include "lua/utils.h"
-#include "box/execute.h"
-#include "box/vstream.h"
-
-struct luastream {
-	struct lua_State *L;
-};
+#include "vstream.h"
+#include "port.h"
 
 void
 luastream_init(struct luastream *stream, struct lua_State *L)
 {
-	struct luastream *luastream = (struct luastream *)stream;
-	luastream->L = L;
+	stream->L = L;
 }
 
-void
+static void
 luastream_encode_array(struct luastream *stream, uint32_t size)
 {
 	lua_createtable(stream->L, size, 0);
 }
 
-void
+static void
 luastream_encode_map(struct luastream *stream, uint32_t size)
 {
 	lua_createtable(stream->L, size, 0);
 }
 
-void
+static void
 luastream_encode_uint(struct luastream *stream, uint64_t num)
 {
 	luaL_pushuint64(stream->L, num);
 }
 
-void
+static void
 luastream_encode_int(struct luastream *stream, int64_t num)
 {
 	luaL_pushint64(stream->L, num);
 }
 
-void
+static void
 luastream_encode_float(struct luastream *stream, float num)
 {
 	lua_pushnumber(stream->L, num);
 }
 
-void
+static void
 luastream_encode_double(struct luastream *stream, double num)
 {
 	lua_pushnumber(stream->L, num);
 }
 
-void
+static void
 luastream_encode_strn(struct luastream *stream, const char *str, uint32_t len)
 {
 	lua_pushlstring(stream->L, str, len);
 }
 
-void
+static void
 luastream_encode_nil(struct luastream *stream)
 {
 	lua_pushnil(stream->L);
 }
 
-void
+static void
 luastream_encode_bool(struct luastream *stream, bool val)
 {
 	lua_pushboolean(stream->L, val);
 }
 
-int
+static int
 lua_vstream_encode_port(struct vstream *stream, struct port *port)
 {
 	port_dump_lua(port, ((struct luastream *)stream)->L);
 	return 0;
 }
 
-void
+static void
 lua_vstream_encode_enum(struct vstream *stream, int64_t num, const char *str)
 {
 	(void)num;
 	lua_pushlstring(((struct luastream *)stream)->L, str, strlen(str));
 }
 
-void
+static void
 lua_vstream_encode_map_commit(struct vstream *stream)
 {
 	size_t length;
@@ -122,13 +117,13 @@ lua_vstream_encode_map_commit(struct vstream *stream)
 	lua_pop(((struct luastream *)stream)->L, 1);
 }
 
-void
+static void
 lua_vstream_encode_array_commit(struct vstream *stream, uint32_t id)
 {
 	lua_rawseti(((struct luastream *)stream)->L, -2, id + 1);
 }
 
-const struct vstream_vtab lua_vstream_vtab = {
+static const struct vstream_vtab lua_vstream_vtab = {
 	/** encode_array = */ (encode_array_f)luastream_encode_array,
 	/** encode_map = */ (encode_map_f)luastream_encode_map,
 	/** encode_uint = */ (encode_uint_f)luastream_encode_uint,
@@ -145,7 +140,9 @@ const struct vstream_vtab lua_vstream_vtab = {
 };
 
 void
-lua_vstream_init_vtab(struct vstream *stream)
+luavstream_init(struct vstream *stream, struct lua_State *L)
 {
 	stream->vtab = &lua_vstream_vtab;
+	assert(sizeof(stream->inheritance_padding) >= sizeof(struct luastream));
+	luastream_init((struct luastream *) stream, L);
 }

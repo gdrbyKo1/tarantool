@@ -52,6 +52,7 @@ struct region;
 struct sql_bind;
 struct xrow_header;
 struct vstream;
+struct lua_State;
 
 /** EXECUTE request. */
 struct sql_request {

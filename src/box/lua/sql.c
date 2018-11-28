@@ -5,9 +5,10 @@
 #include "box/sql/sqliteInt.h"
 #include "box/info.h"
 #include "lua/utils.h"
+#include "lua/luastream.h"
 #include "info.h"
 #include "box/execute.h"
-#include "box/vstream.h"
+#include "vstream.h"
 
 static void
 lua_push_column_names(struct lua_State *L, struct sqlite3_stmt *stmt)
@@ -135,8 +136,7 @@ lbox_execute(struct lua_State *L)
 
 	int keys;
 	struct vstream vstream;
-	luastream_init((struct luastream *)&vstream, L);
-	lua_vstream_init_vtab(&vstream);
+	luavstream_init(&vstream, L);
 	lua_newtable(L);
 	if (sql_response_dump(&response, &keys, &vstream) != 0) {
 		lua_pop(L, 1);

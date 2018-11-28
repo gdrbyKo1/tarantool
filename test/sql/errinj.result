@@ -285,6 +285,9 @@ box.sql.execute("DROP TABLE t3;")
 box.sql.execute('create table test (id int primary key)')
 ---
 ...
+box.sql.execute("insert into test values (1)")
+---
+...
 errinj.set("ERRINJ_WAL_DELAY", true)
 ---
 - ok
@@ -298,7 +301,23 @@ f1 = fiber.create(execute_yield_drop_table)
 while f1:status() ~= 'suspended' do fiber.sleep(0) end
 ---
 ...
-box.sql.execute("insert into test values (1)")
+-- Error: no index
+box.sql.execute("insert into test values (2)")
+---
+- error: 'No index #0 is defined in space ''TEST'''
+...
+-- Error: no index
+box.sql.execute("update test set id = 10")
+---
+- error: 'No index #0 is defined in space ''TEST'''
+...
+-- Error: no index
+box.sql.execute("select * from test")
+---
+- error: 'No index #0 is defined in space ''TEST'''
+...
+-- Error: no index
+box.sql.execute('delete from test')
 ---
 - error: 'No index #0 is defined in space ''TEST'''
 ...

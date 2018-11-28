@@ -119,3 +119,10 @@ fk_constraint_count == #box.space._fk_constraint:select()
 box.session.su('admin')
 
 box.schema.user.drop('tmp')
+
+-- gh-3780: Segmentation fault with two users changing the same
+-- SQL table
+s = box.schema.space.create('test', {format={{name = 'id', type = 'integer'}}})
+-- Error: no index
+box.sql.execute('delete from "test"')
+s:drop()

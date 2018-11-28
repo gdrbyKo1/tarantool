@@ -595,6 +595,8 @@ int tarantoolSqlite3ClearTable(struct space *space, uint32_t *tuple_count)
 	request.type = IPROTO_DELETE;
 	request.space_id = space->def->id;
 	struct index *pk = space_index(space, 0 /* PK */);
+	if (index_find(space, 0) == NULL)
+		return SQL_TARANTOOL_ERROR;
 	struct iterator *iter = index_create_iterator(pk, ITER_ALL, nil_key, 0);
 	if (iter == NULL)
 		return SQL_TARANTOOL_ITERATOR_FAIL;

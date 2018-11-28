@@ -101,11 +101,19 @@ box.sql.execute("DROP TABLE t3;")
 -- gh-3780: Segmentation fault with two users changing the same
 -- SQL table
 box.sql.execute('create table test (id int primary key)')
+box.sql.execute("insert into test values (1)")
 errinj.set("ERRINJ_WAL_DELAY", true)
 function execute_yield_drop_table() box.sql.execute("drop table test") end
 f1 = fiber.create(execute_yield_drop_table)
 while f1:status() ~= 'suspended' do fiber.sleep(0) end
-box.sql.execute("insert into test values (1)")
+-- Error: no index
+box.sql.execute("insert into test values (2)")
+-- Error: no index
+box.sql.execute("update test set id = 10")
+-- Error: no index
+box.sql.execute("select * from test")
+-- Error: no index
+box.sql.execute('delete from test')
 errinj.set("ERRINJ_WAL_DELAY", false)
 while f1:status() ~= 'dead' do fiber.sleep(0) end
 box.sql.execute("drop table test")

@@ -284,17 +284,18 @@ local function prepare_data(schema, tuples_cnt, sources_cnt, opts)
     elseif input_type == 'table' then
         -- Imitate netbox's select w/o {buffer = ...}.
         return tuples, exp_result
-    elseif input_type == 'function' then
-        -- Return functions that give one tuple per call.
+    elseif input_type == 'iterator' then
+        -- Lua iterator.
         local inputs = {}
         for i = 1, sources_cnt do
-            local idx = 1
-            -- XXX: Maybe this func should be an iterator generator?
-            inputs[i] = function()
-                local res = tuples[i][idx]
-                idx = idx + 1
-                return res
-            end
+            inputs[i] = {
+                -- gen (next)
+                next,
+                -- param (tuples)
+                tuples[i],
+                -- state (idx)
+                nil
+            }
         end
         return inputs, exp_result
     end
@@ -554,8 +555,8 @@ local merger_inst = merger.new({{
 local start_usage = 'start(merger, {buffer, buffer, ...}' ..
     '[, {descending = <boolean> or <nil>, ' ..
     'input_chain_first = <boolean> or <nil>, ' ..
-    'buffer = <cdata<struct ibuf>>, ' ..
-    'table_output = <table>, ' ..
+    'buffer = <cdata<struct ibuf>> or <nil>, ' ..
+    'table_output = <table> or <nil>, ' ..
     'output_chain_first = <boolean> or <nil>, ' ..
     'output_chain_len = <number> or <nil>}])'
 
@@ -583,12 +584,12 @@ test:is_deeply({ok, err}, {false, exp_err},
 
 -- Case: start() bad buffer.
 local ok, err = pcall(merger_inst.start, merger_inst, {1})
-local exp_err = 'Unknown input type at index 1'
+local exp_err = 'Unknown source type at index 1'
 test:is_deeply({ok, err}, {false, exp_err}, 'start() bad buffer')
 
 -- Case: start() bad cdata buffer.
 local ok, err = pcall(merger_inst.start, merger_inst, {ffi.new('char *')})
-local exp_err = 'Unknown input type at index 1'
+local exp_err = 'Unknown source type at index 1'
 test:is_deeply({ok, err}, {false, exp_err}, 'start() bad cdata buffer')
 
 -- Case: start() missed output_chain_len.
@@ -605,11 +606,12 @@ local exp_err = '"buffer" and "table_output" options are mutually exclusive'
 test:is_deeply({ok, err}, {false, exp_err},
     'start() both buffer and table_output')
 
--- Case: function input + chaining.
-local ok, err = pcall(merger_inst.start, merger_inst, {function() end},
+-- Case: iterator input + chaining.
+local iterator = {pairs({})}
+local ok, err = pcall(merger_inst.start, merger_inst, {iterator},
     {buffer = buffer.ibuf(), output_chain_first = true, output_chain_len = 1})
-local exp_err = 'Cannot use source of a function type with chained output'
-test:is_deeply({ok, err}, {false, exp_err}, 'function input is forbidded ' ..
+local exp_err = 'Cannot use source of an iterator type with chained output'
+test:is_deeply({ok, err}, {false, exp_err}, 'iterator input is forbidded ' ..
     'with chaining')
 
 -- Case: wrong table input item.
@@ -619,12 +621,12 @@ test:is_deeply({ok, err}, {false, exp_err}, 'wrong table input item')
 
 -- Remaining cases.
 for _, use_chain_io in ipairs({false, true}) do
-    for _, input_type in ipairs({'buffer', 'table', 'function'}) do
+    for _, input_type in ipairs({'buffer', 'table', 'iterator'}) do
         for _, output_type in ipairs({'buffer', 'table', 'function'}) do
             for _, schema in ipairs(schemas) do
-                -- One cannot use function input with chain buffer
+                -- One cannot use iterator input with chain buffer
                 -- output.
-                if input_type == 'function' and use_chain_io then
+                if input_type == 'iterator' and use_chain_io then
                     goto continue
                 end
                 for _, use_table_as_tuple in ipairs({false, true}) do

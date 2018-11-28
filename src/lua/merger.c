@@ -52,7 +52,9 @@
 #include "box/lua/tuple.h"
 #include "box/box.h"
 #include "box/index.h"
-#include "src/box/coll_id_cache.h"
+#include "box/coll_id_cache.h"
+#include "lua/lua_iterator.h"
+#include "diag.h"
 
 #ifndef NDEBUG
 
@@ -91,8 +93,6 @@
 
 #endif /* !defined(NDEBUG) */
 
-#include "diag.h"
-
 #define BOX_COLLATION_NAME_INDEX 1
 
 /**
@@ -108,7 +108,8 @@
 enum source_type_t {
 	SOURCE_TYPE_BUFFER,
 	SOURCE_TYPE_TABLE,
-	SOURCE_TYPE_FUNCTION,
+	SOURCE_TYPE_ITERATOR,
+	SOURCE_TYPE_NONE,
 };
 
 enum result_type_t {
@@ -134,10 +135,10 @@ struct source {
 			int ref;
 			int next_idx;
 		} tbl;
-		/* Fields specific for a function source. */
+		/* Fields specific for an iterator source. */
 		struct {
-			int ref;
-		} fnc;
+			struct lua_iterator_t *it;
+		} it;
 	} input;
 	struct tuple *tuple;
 };
@@ -168,12 +169,12 @@ struct merger {
 	uint32_t output_chain_len;
 	/*
 	 * Merger sums input buffers and tables lengths and then,
-	 * during an output buffer encoding, adds function sources
+	 * during an output buffer encoding, adds iterator sources
 	 * lengths (because their sizes are unknown until the
 	 * end).
 	 */
 	uint32_t precalculated_result_len;
-	bool has_function_source;
+	bool has_iterator_source;
 };
 
 static int
@@ -261,7 +262,7 @@ source_fetch(struct lua_State *L, struct source *source,
 	source->tuple = NULL;
 
 	switch (source->source_type) {
-	case SOURCE_TYPE_BUFFER:
+	case SOURCE_TYPE_BUFFER: {
 		if (source->input.buf.remaining_tuples_cnt == 0)
 			return;
 		--source->input.buf.remaining_tuples_cnt;
@@ -282,7 +283,8 @@ source_fetch(struct lua_State *L, struct source *source,
 			return;
 		}
 		break;
-	case SOURCE_TYPE_TABLE:
+	}
+	case SOURCE_TYPE_TABLE: {
 		lua_rawgeti(L, LUA_REGISTRYINDEX, source->input.tbl.ref);
 		lua_pushinteger(L, source->input.tbl.next_idx);
 		lua_gettable(L, -2);
@@ -294,16 +296,19 @@ source_fetch(struct lua_State *L, struct source *source,
 		++source->input.tbl.next_idx;
 		lua_pop(L, 2);
 		break;
-	case SOURCE_TYPE_FUNCTION:
-		lua_rawgeti(L, LUA_REGISTRYINDEX, source->input.fnc.ref);
-		lua_call(L, 0, 1);
-		if (lua_isnil(L, -1)) {
-			lua_pop(L, 1);
+	}
+	case SOURCE_TYPE_ITERATOR: {
+		int nresult = lua_iterator_next(L, source->input.it.it);
+		if (nresult == 0)
 			return;
-		}
-		source->tuple = luaT_gettuple_with_format(L, -1, format);
-		lua_pop(L, 1);
+		source->tuple = luaT_gettuple_with_format(L, -nresult + 1,
+							  format);
+		lua_pop(L, nresult);
 		break;
+	}
+	case SOURCE_TYPE_NONE:
+	default:
+		unreachable();
 	}
 	box_tuple_ref(source->tuple);
 }
@@ -315,9 +320,8 @@ free_sources(struct lua_State *L, struct merger *merger)
 		if (merger->sources[i]->source_type == SOURCE_TYPE_TABLE)
 			luaL_unref(L, LUA_REGISTRYINDEX,
 				   merger->sources[i]->input.tbl.ref);
-		if (merger->sources[i]->source_type == SOURCE_TYPE_FUNCTION)
-			luaL_unref(L, LUA_REGISTRYINDEX,
-				   merger->sources[i]->input.fnc.ref);
+		if (merger->sources[i]->source_type == SOURCE_TYPE_ITERATOR)
+			lua_iterator_free(L, merger->sources[i]->input.it.it);
 		if (merger->sources[i]->tuple != NULL)
 			box_tuple_unref(merger->sources[i]->tuple);
 		free(merger->sources[i]);
@@ -421,8 +425,8 @@ static int start_usage_error(struct lua_State *L, const char *param_name)
 				   "{buffer, buffer, ...}[, {"
 				   "descending = <boolean> or <nil>, "
 				   "input_chain_first = <boolean> or <nil>, "
-				   "buffer = <cdata<struct ibuf>>, "
-				   "table_output = <table>, "
+				   "buffer = <cdata<struct ibuf>> or <nil>, "
+				   "table_output = <table> or <nil>, "
 				   "output_chain_first = <boolean> or <nil>, "
 				   "output_chain_len = <number> or <nil>}])";
 	if (param_name == NULL)
@@ -432,7 +436,7 @@ static int start_usage_error(struct lua_State *L, const char *param_name)
 				  usage);
 }
 
-/* Increases *result_len_p in case of source of function type. */
+/* Increases *result_len_p in case of source of iterator type. */
 static struct tuple *
 merger_next(struct lua_State *L, struct merger *merger, uint32_t *result_len_p)
 {
@@ -448,7 +452,7 @@ merger_next(struct lua_State *L, struct merger *merger, uint32_t *result_len_p)
 	else
 		MERGER_HEAP_UPDATE(&merger->heap, hnode, source);
 
-	if (source->source_type == SOURCE_TYPE_FUNCTION && result_len_p != NULL)
+	if (source->source_type == SOURCE_TYPE_ITERATOR && result_len_p != NULL)
 		++(*result_len_p);
 
 	return res;
@@ -463,10 +467,10 @@ encode_result_buffer(struct lua_State *L, struct merger *merger)
 
 	/*
 	 * Reserve maximum size for the array around chained
-	 * output to set it later in case of a function source
+	 * output to set it later in case of an iterator source
 	 * is used.
 	 */
-	encode_header(merger, merger->has_function_source ? UINT32_MAX :
+	encode_header(merger, merger->has_iterator_source ? UINT32_MAX :
 			      result_len);
 
 	/* Fetch, merge and copy tuples to the buffer. */
@@ -481,7 +485,7 @@ encode_result_buffer(struct lua_State *L, struct merger *merger)
 	}
 
 	/* Write the real array size if needed. */
-	if (merger->has_function_source)
+	if (merger->has_iterator_source)
 		mp_store_u32(obuf->wpos - result_len_offset, result_len);
 }
 
@@ -521,7 +525,49 @@ encode_result_table(struct lua_State *L, struct merger *merger)
 		lua_pop(L, 1);
 }
 
+static enum source_type_t
+get_source_type(lua_State *L, int idx, struct ibuf **buf_p)
+{
+	if (lua_type(L, idx) == LUA_TCDATA) {
+		struct ibuf *buf = check_ibuf(L, idx);
+		if (buf == NULL)
+			return SOURCE_TYPE_NONE;
+		if (buf_p != NULL)
+			*buf_p = buf;
+		return SOURCE_TYPE_BUFFER;
+	} else if (lua_istable(L, idx)) {
+		lua_rawgeti(L, idx, 1);
+		int iscallable = luaT_iscallable(L, idx);
+		lua_pop(L, 1);
+		if (iscallable)
+			return SOURCE_TYPE_ITERATOR;
+		return SOURCE_TYPE_TABLE;
+	}
+
+	return SOURCE_TYPE_NONE;
+}
+
 /*
+ * Usage
+ * =====
+ *
+ * merger:start(sources, opts)
+ *
+ * sourses is a table where each source is either:
+ *
+ * * buffer (cdata<struct ibuf>);
+ * * table;
+ * * {gen, param, state}.
+ *
+ * opts are:
+ *
+ * * descending (boolean or nil);
+ * * input_chain_first (boolean or nil);
+ * * buffer (cdata<struct ibuf> or nil);
+ * * table_output (table or nil);
+ * * output_chain_first (boolean or nil);
+ * * output_chain_len (number or nil).
+ *
  * Chained mergers
  * ===============
  *
@@ -597,7 +643,7 @@ lbox_merger_start(struct lua_State *L)
 
 	/* Flush info for output buffer encoding. */
 	merger->precalculated_result_len = 0;
-	merger->has_function_source = false;
+	merger->has_iterator_source = false;
 
 	/* Parse opts. */
 	if (lua_istable(L, 3)) {
@@ -696,26 +742,34 @@ lbox_merger_start(struct lua_State *L)
 	/* Verify that all sources have right types. */
 	int i = 1;
 	while (true) {
-		lua_pushinteger(L, i);
-		lua_gettable(L, 2);
+		lua_rawgeti(L, 2, i);
 		if (lua_isnil(L, -1))
 			break;
-		if (lua_isfunction(L, -1))
-			merger->has_function_source = true;
-		else if (check_ibuf(L, -1) == NULL && !lua_istable(L, -1))
-			return luaL_error(L, "Unknown input type at index %d",
+		switch (get_source_type(L, -1, NULL)) {
+		case SOURCE_TYPE_BUFFER:
+		case SOURCE_TYPE_TABLE:
+			/* No-op. */
+			break;
+		case SOURCE_TYPE_ITERATOR:
+			merger->has_iterator_source = true;
+			break;
+		case SOURCE_TYPE_NONE:
+			return luaL_error(L, "Unknown source type at index %d",
 					  i);
+		default:
+			unreachable();
+		}
 		++i;
 	}
 	lua_pop(L, i);
 
 	/*
-	 * Verify that we have no function input in case of
+	 * Verify that we have no iterator input in case of
 	 * chained mergers, because it is unclear how to
 	 * distinguish one array of tuples from an another.
 	 */
-	if (merger->has_function_source && merger->output_chain)
-		return luaL_error(L, "Cannot use source of a function type "
+	if (merger->has_iterator_source && merger->output_chain)
+		return luaL_error(L, "Cannot use source of an iterator type "
 				  "with chained output");
 
 	/* (Re)allocate sources array. */
@@ -732,12 +786,10 @@ lbox_merger_start(struct lua_State *L)
 		lua_gettable(L, 2);
 		if (lua_isnil(L, -1))
 			break;
-		enum source_type_t source_type;
 		struct ibuf *buf = NULL;
-		if (lua_type(L, -1) == LUA_TCDATA) {
-			/* Buffer input. */
-			source_type = SOURCE_TYPE_BUFFER;
-			buf = check_ibuf(L, -1);
+		enum source_type_t source_type = get_source_type(L, -1, &buf);
+		switch (source_type) {
+		case SOURCE_TYPE_BUFFER:
 			if (ibuf_used(buf) == 0) {
 				/*
 				 * In case of chained merger at
@@ -755,13 +807,14 @@ lbox_merger_start(struct lua_State *L)
 				lua_pop(L, 1);
 				continue;
 			}
-		} else if (lua_istable(L, -1) ) {
-			/* Table input. */
-			source_type = SOURCE_TYPE_TABLE;
-		} else {
-			assert(lua_isfunction(L, -1));
-			/* Function input. */
-			source_type = SOURCE_TYPE_FUNCTION;
+			break;
+		case SOURCE_TYPE_TABLE:
+		case SOURCE_TYPE_ITERATOR:
+			/* No-op. */
+			break;
+		case SOURCE_TYPE_NONE:
+		default:
+			unreachable();
 		}
 
 		/* Shrink sources array if needed. */
@@ -837,12 +890,14 @@ lbox_merger_start(struct lua_State *L)
 			current_source->input.tbl.next_idx = 1;
 			merger->precalculated_result_len += lua_objlen(L, -1);
 			break;
-		case SOURCE_TYPE_FUNCTION:
-			/* Save a function to get next tuple. */
-			lua_pushvalue(L, -1); /* Popped by luaL_ref(). */
-			int fnc_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-			current_source->input.fnc.ref = fnc_ref;
+		case SOURCE_TYPE_ITERATOR:
+			/* Wrap and save iterator. */
+			current_source->input.it.it =
+				lua_iterator_new_fromtable(L, -1);
 			break;
+		case SOURCE_TYPE_NONE:
+		default:
+			unreachable();
 		}
 		source_fetch(L, current_source, merger->format);
 		if (current_source->tuple != NULL)

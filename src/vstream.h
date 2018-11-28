@@ -35,7 +35,6 @@ extern "C" {
 #endif /* defined(__cplusplus) */
 
 struct vstream;
-struct lua_State;
 struct port;
 
 typedef void (*encode_array_f)(struct vstream *stream, uint32_t size);

@@ -1611,11 +1611,10 @@ tx_process_sql(struct cmsg *m)
 		goto error;
 
 	struct vstream stream;
-	mpstream_init((struct mpstream *)&stream, out, obuf_reserve_cb,
-		      obuf_alloc_cb, set_encode_error, &is_error);
+	mpvstream_init(&stream, out, obuf_reserve_cb, obuf_alloc_cb,
+		       set_encode_error, &is_error);
 	if (is_error)
 		goto error;
-	mp_vstream_init_vtab(&stream);
 	if (sql_response_dump(&response, &keys, &stream) != 0 || is_error) {
 		obuf_rollback_to_svp(out, &header_svp);
 		goto error;

@@ -33,8 +33,8 @@
 #include <assert.h>
 #include <stdint.h>
 #include "msgpuck.h"
-#include "box/vstream.h"
-#include "box/port.h"
+#include "vstream.h"
+#include "port.h"
 
 void
 mpstream_reserve_slow(struct mpstream *stream, size_t size)
@@ -178,7 +178,7 @@ mpstream_encode_bool(struct mpstream *stream, bool val)
     mpstream_advance(stream, pos - data);
 }
 
-int
+static int
 mp_vstream_encode_port(struct vstream *stream, struct port *port)
 {
 	struct mpstream *mpstream = (struct mpstream *)stream;
@@ -191,7 +191,7 @@ mp_vstream_encode_port(struct vstream *stream, struct port *port)
 	return 0;
 }
 
-void
+static void
 mp_vstream_encode_enum(struct vstream *stream, int64_t num, const char *str)
 {
 	(void)str;
@@ -201,13 +201,13 @@ mp_vstream_encode_enum(struct vstream *stream, int64_t num, const char *str)
 		mpstream_encode_uint((struct mpstream *)stream, num);
 }
 
-void
+static void
 mp_vstream_noop(struct vstream *stream, ...)
 {
 	(void) stream;
 }
 
-const struct vstream_vtab mp_vstream_vtab = {
+static const struct vstream_vtab mp_vstream_vtab = {
 	/** encode_array = */ (encode_array_f)mpstream_encode_array,
 	/** encode_map = */ (encode_map_f)mpstream_encode_map,
 	/** encode_uint = */ (encode_uint_f)mpstream_encode_uint,
@@ -224,7 +224,11 @@ const struct vstream_vtab mp_vstream_vtab = {
 };
 
 void
-mp_vstream_init_vtab(struct vstream *vstream)
+mpvstream_init(struct vstream *stream, void *ctx, mpstream_reserve_f reserve,
+	       mpstream_alloc_f alloc, mpstream_error_f error, void *error_ctx)
 {
-	vstream->vtab = &mp_vstream_vtab;
+	stream->vtab = &mp_vstream_vtab;
+	assert(sizeof(stream->inheritance_padding) >= sizeof(struct mpstream));
+	mpstream_init((struct mpstream *) stream, ctx, reserve, alloc, error,
+		      error_ctx);
 }

@@ -5,11 +5,15 @@ local merger_t = ffi.typeof('struct merger')
 
 local methods = {
     ['start'] = merger.internal.start,
-    ['next']  = merger.internal.next,
+    ['pairs']  = merger.internal.ipairs,
+    ['ipairs']  = merger.internal.ipairs,
 }
 
 ffi.metatype(merger_t, {
     __index = function(merger, key)
         return methods[key]
-    end
+    end,
+    -- Lua 5.2 compatibility
+    __pairs = merger.internal.ipairs,
+    __ipairs = merger.internal.ipairs,
 })

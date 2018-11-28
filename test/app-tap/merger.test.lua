@@ -371,12 +371,10 @@ local function run_merger_internal(context)
             res = data
         end
     else
-        -- Function output.
+        -- Iterator output.
         res = {}
 
-        while true do
-            local tuple = merger_inst:next()
-            if tuple == nil then break end
+        for _, tuple in merger_inst:pairs() do
             table.insert(res, tuple)
         end
     end
@@ -622,7 +620,7 @@ test:is_deeply({ok, err}, {false, exp_err}, 'wrong table input item')
 -- Remaining cases.
 for _, use_chain_io in ipairs({false, true}) do
     for _, input_type in ipairs({'buffer', 'table', 'iterator'}) do
-        for _, output_type in ipairs({'buffer', 'table', 'function'}) do
+        for _, output_type in ipairs({'buffer', 'table', 'iterator'}) do
             for _, schema in ipairs(schemas) do
                 -- One cannot use iterator input with chain buffer
                 -- output.

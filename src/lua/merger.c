@@ -918,26 +918,54 @@ lbox_merger_start(struct lua_State *L)
 	return 0;
 }
 
+/**
+ * Calling convention: next(merger, any value).
+ */
 static int
 lbox_merger_next(struct lua_State *L)
 {
 	struct merger *merger;
-	if (lua_gettop(L) != 1 || (merger = check_merger(L, 1)) == NULL)
-		return luaL_error(L, "Bad params, use: next(merger)");
+	if ((merger = check_merger(L, -2)) == NULL)
+		return luaL_error(L,
+			"Bad params, use: lbox_merger_next(merger, any value)");
 	struct heap_node *hnode = merger_heap_top(&merger->heap);
 	if (hnode == NULL) {
 		lua_pushnil(L);
-		return 1;
+		lua_pushnil(L);
+		return 2;
 	}
 	struct source *source = container_of(hnode, struct source, hnode);
-	luaT_pushtuple(L, source->tuple);
+
+	/* The first result should be anything non-nil. */
+	lua_pushboolean(L, true);	  /* retval 1 */
+	luaT_pushtuple(L, source->tuple); /* retval 2 */
+
 	box_tuple_unref(source->tuple);
 	source_fetch(L, source, merger->format);
 	if (source->tuple == NULL)
 		MERGER_HEAP_DELETE(&merger->heap, hnode, source);
 	else
 		MERGER_HEAP_UPDATE(&merger->heap, hnode, source);
-	return 1;
+	return 2;
+}
+
+/**
+ * Return three values:
+ *
+ * 1. gen (lbox_merger_next);
+ * 2. param (merger);
+ * 3. state (true).
+ */
+static int
+lbox_merger_ipairs(struct lua_State *L)
+{
+	if (lua_gettop(L) != 1 || check_merger(L, 1) == NULL)
+		return luaL_error(L, "Bad params, use: merger:ipairs()");
+	lua_pushvalue(L, -1);
+	lua_pushcfunction(L, lbox_merger_next);
+	lua_replace(L, -3);
+	lua_pushboolean(L, true);
+	return 3;
 }
 
 static uint32_t
@@ -1145,8 +1173,8 @@ luaopen_merger(lua_State *L)
 	lua_newtable(L); /* merger.internal */
 	lua_pushcfunction(L, lbox_merger_start);
 	lua_setfield(L, -2, "start");
-	lua_pushcfunction(L, lbox_merger_next);
-	lua_setfield(L, -2, "next");
+	lua_pushcfunction(L, lbox_merger_ipairs);
+	lua_setfield(L, -2, "ipairs");
 	lua_setfield(L, -2, "internal");
 
 	return 1;

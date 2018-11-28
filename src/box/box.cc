@@ -2288,15 +2288,15 @@ box_checkpoint()
 	if ((rc = engine_begin_checkpoint()))
 		goto end;
 
-	struct vclock vclock;
-	if ((rc = wal_begin_checkpoint(&vclock)))
+	struct wal_checkpoint checkpoint;
+	if ((rc = wal_begin_checkpoint(&checkpoint)))
 		goto end;
 
-	if ((rc = engine_commit_checkpoint(&vclock)))
+	if ((rc = engine_commit_checkpoint(&checkpoint.vclock)))
 		goto end;
 
-	wal_commit_checkpoint(&vclock);
-	gc_add_checkpoint(&vclock);
+	wal_commit_checkpoint(&checkpoint);
+	gc_add_checkpoint(&checkpoint.vclock);
 end:
 	if (rc)
 		engine_abort_checkpoint();

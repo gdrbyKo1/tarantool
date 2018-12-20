@@ -7,7 +7,6 @@ lua_source(lua_sources lua/load_cfg.lua)
 lua_source(lua_sources lua/schema.lua)
 lua_source(lua_sources lua/tuple.lua)
 lua_source(lua_sources lua/session.lua)
-lua_source(lua_sources lua/checkpoint_daemon.lua)
 lua_source(lua_sources lua/feedback_daemon.lua)
 lua_source(lua_sources lua/net_box.lua)
 lua_source(lua_sources lua/upgrade.lua)
@@ -50,7 +49,7 @@ add_library(tuple STATIC
     field_def.c
     opt_def.c
 )
-target_link_libraries(tuple json_path box_error core ${MSGPUCK_LIBRARIES} ${ICU_LIBRARIES} misc bit)
+target_link_libraries(tuple json box_error core ${MSGPUCK_LIBRARIES} ${ICU_LIBRARIES} misc bit)
 
 add_library(xlog STATIC xlog.c)
 target_link_libraries(xlog core box_error crc32 ${ZSTD_LIBRARIES})
@@ -106,6 +105,7 @@ add_library(box STATIC
     txn.c
     box.cc
     gc.c
+    checkpoint_schedule.c
     user_def.c
     user.cc
     authentication.cc

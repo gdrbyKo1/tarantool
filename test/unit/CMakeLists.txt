@@ -129,13 +129,15 @@ add_executable(reflection_cxx.test reflection_cxx.cc unit.c
 add_executable(csv.test csv.c)
 target_link_libraries(csv.test csv)
 
-add_executable(json_path.test json_path.c)
-target_link_libraries(json_path.test json_path unit ${ICU_LIBRARIES})
+add_executable(json.test json.c)
+target_link_libraries(json.test json unit ${ICU_LIBRARIES})
 
 add_executable(rmean.test rmean.cc)
 target_link_libraries(rmean.test stat unit)
 add_executable(histogram.test histogram.c)
 target_link_libraries(histogram.test stat unit)
+add_executable(ratelimit.test ratelimit.c)
+target_link_libraries(ratelimit.test unit)
 
 add_executable(say.test say.c)
 target_link_libraries(say.test core unit)
@@ -195,3 +197,9 @@ target_link_libraries(coll.test core unit ${ICU_LIBRARIES} misc)
 
 add_executable(tuple_bigref.test tuple_bigref.c)
 target_link_libraries(tuple_bigref.test tuple unit)
+
+add_executable(checkpoint_schedule.test
+    checkpoint_schedule.c
+    ${PROJECT_SOURCE_DIR}/src/box/checkpoint_schedule.c
+)
+target_link_libraries(checkpoint_schedule.test m unit)

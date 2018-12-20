@@ -754,22 +754,23 @@ greeting =
 "Tarantool 1.7.3 (Lua console)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n" ..
 "type 'help' for interactive help~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
 socket = require('socket');
-srv = socket.tcp_server('localhost', 3392, {
+srv = socket.tcp_server('localhost', 0, {
     handler = function(fd)
         local fiber = require('fiber')
         fiber.sleep(0.1)
         fd:write(greeting)
     end
 });
+port = srv:name().port
 -- we must get timeout
-nb = net.new('localhost:3392', {
+nb = net.new('localhost:' .. port, {
     wait_connected = true, console = true,
     connect_timeout = 0.01
 });
 nb.error:find('timed out') ~= nil;
 nb:close();
 -- we must get peer closed
-nb = net.new('localhost:3392', {
+nb = net.new('localhost:' .. port, {
     wait_connected = true, console = true,
     connect_timeout = 0.2
 });
@@ -934,6 +935,11 @@ fiber.sleep(0)
 
 box.session.on_disconnect(on_disconnect) == on_disconnect
 
+--
+-- gh-3859: on_disconnect is called only after all requests are
+-- processed, but should be called right after disconnect and
+-- only once.
+--
 ch1 = fiber.channel(1)
 ch2 = fiber.channel(1)
 function wait_signal() ch1:put(true) ch2:get() end
@@ -942,11 +948,13 @@ ch1:get()
 
 c:close()
 fiber.sleep(0)
-disconnected -- false
-
-ch2:put(true)
 while disconnected == false do fiber.sleep(0.01) end
 disconnected -- true
+disconnected = nil
+
+ch2:put(true)
+fiber.sleep(0)
+disconnected -- nil, on_disconnect is not called second time.
 
 box.session.on_disconnect(nil, on_disconnect)
 
@@ -1372,6 +1380,13 @@ c:close()
 ready = true
 while not err do fiber.sleep(0.01) end
 ok, err
+
+--
+-- gh-3856: wait_connected = false is ignored.
+--
+c = net.connect('8.8.8.8:123456', {wait_connected = false})
+c
+c:close()
 
 box.schema.func.drop('do_long')
 box.schema.user.revoke('guest', 'write', 'space', '_schema')

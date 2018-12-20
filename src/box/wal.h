@@ -52,29 +52,39 @@ extern int wal_dir_lock;
 extern "C" {
 #endif /* defined(__cplusplus) */
 
+/**
+ * Callback invoked in the TX thread when the WAL thread runs out
+ * of disk space and has to delete some old WAL files to continue.
+ * It is supposed to shoot off WAL consumers that need the deleted
+ * files. The vclock of the oldest WAL row still available on the
+ * instance is passed in @vclock.
+ */
+typedef void (*wal_on_garbage_collection_f)(const struct vclock *vclock);
+
+/**
+ * Callback invoked in the TX thread when the total size of WAL
+ * files written since the last checkpoint exceeds the configured
+ * threshold.
+ */
+typedef void (*wal_on_checkpoint_threshold_f)(void);
+
 void
 wal_thread_start();
 
 int
 wal_init(enum wal_mode wal_mode, const char *wal_dirname, int64_t wal_max_rows,
 	 int64_t wal_max_size, const struct tt_uuid *instance_uuid,
-	 const struct vclock *vclock, const struct vclock *first_checkpoint_vclock);
+	 const struct vclock *vclock, const struct vclock *checkpoint_vclock,
+	 wal_on_garbage_collection_f on_garbage_collection,
+	 wal_on_checkpoint_threshold_f on_checkpoint_threshold);
 
 void
 wal_thread_stop();
 
-/**
- * A notification message sent from the WAL to a watcher
- * when a WAL event occurs.
- */
 struct wal_watcher_msg {
 	struct cmsg cmsg;
-	/** Pointer to the watcher this message is for. */
 	struct wal_watcher *watcher;
-	/** Bit mask of events, see wal_event. */
 	unsigned events;
-	/** VClock of the oldest stored WAL row. */
-	struct vclock gc_vclock;
 };
 
 enum wal_event {
@@ -82,18 +92,13 @@ enum wal_event {
 	WAL_EVENT_WRITE		= (1 << 0),
 	/** A new WAL is created. */
 	WAL_EVENT_ROTATE	= (1 << 1),
-	/**
-	 * The WAL thread ran out of disk space and had to delete
-	 * one or more old WAL files.
-	 **/
-	WAL_EVENT_GC		= (1 << 2),
 };
 
 struct wal_watcher {
 	/** Link in wal_writer::watchers. */
 	struct rlist next;
 	/** The watcher callback function. */
-	void (*cb)(struct wal_watcher_msg *);
+	void (*cb)(struct wal_watcher *, unsigned events);
 	/** Pipe from the watcher to WAL. */
 	struct cpipe wal_pipe;
 	/** Pipe from WAL to the watcher. */
@@ -102,11 +107,6 @@ struct wal_watcher {
 	struct cmsg_hop route[2];
 	/** Message sent to notify the watcher. */
 	struct wal_watcher_msg msg;
-	/**
-	 * Bit mask of WAL events that this watcher is
-	 * interested in.
-	 */
-	unsigned event_mask;
 	/**
 	 * Bit mask of WAL events that happened while
 	 * the notification message was en route.
@@ -132,19 +132,17 @@ struct wal_watcher {
  * @param watcher     WAL watcher to register.
  * @param name        Name of the cbus endpoint at the caller's cord.
  * @param watcher_cb  Callback to invoke from the caller's cord
- *                    upon receiving a WAL event. It takes an object
- *                    of type wal_watcher_msg that stores a pointer
- *                    to the watcher and information about the event.
+ *                    upon receiving a WAL event. Apart from the
+ *                    watcher itself, it takes a bit mask of events.
+ *                    Events are described in wal_event enum.
  * @param process_cb  Function called to process cbus messages
  *                    while the watcher is being attached or NULL
  *                    if the cbus loop is running elsewhere.
- * @param event_mask  Bit mask of events the watcher is interested in.
  */
 void
 wal_set_watcher(struct wal_watcher *watcher, const char *name,
-		void (*watcher_cb)(struct wal_watcher_msg *),
-		void (*process_cb)(struct cbus_endpoint *),
-		unsigned event_mask);
+		void (*watcher_cb)(struct wal_watcher *, unsigned events),
+		void (*process_cb)(struct cbus_endpoint *));
 
 /**
  * Unsubscribe from WAL events.
@@ -166,26 +164,58 @@ wal_mode();
 
 /**
  * Wait till all pending changes to the WAL are flushed.
- * Rotates the WAL.
+ */
+void
+wal_sync(void);
+
+struct wal_checkpoint {
+	struct cbus_call_msg base;
+	/**
+	 * VClock of the last record written to the rotated WAL.
+	 * This is the vclock that is supposed to be used to
+	 * identify the new checkpoint.
+	 */
+	struct vclock vclock;
+	/**
+	 * Size of WAL files written since the last checkpoint.
+	 * Used to reset the corresponding WAL counter upon
+	 * successful checkpoint creation.
+	 */
+	int64_t wal_size;
+};
+
+/**
+ * Prepare WAL for checkpointing.
  *
- * @param[out] vclock WAL vclock
- *
+ * This function flushes all pending changes and rotates the
+ * current WAL. Checkpoint info is returned in @checkpoint.
+ * It is supposed to be passed to wal_commit_checkpoint()
+ * upon successful checkpoint creation.
  */
 int
-wal_checkpoint(struct vclock *vclock, bool rotate);
+wal_begin_checkpoint(struct wal_checkpoint *checkpoint);
+
+/**
+ * This function is called upon successful checkpoint creation.
+ * It updates the WAL thread's version of the last checkpoint
+ * vclock.
+ */
+void
+wal_commit_checkpoint(struct wal_checkpoint *checkpoint);
+
+/**
+ * Set the WAL size threshold exceeding which will trigger
+ * checkpointing in TX.
+ */
+void
+wal_set_checkpoint_threshold(int64_t threshold);
 
 /**
  * Remove WAL files that are not needed by consumers reading
- * rows at @wal_vclock or newer.
- *
- * Update the oldest checkpoint signature with @checkpoint_vclock.
- * WAL thread will delete WAL files that are not needed to
- * recover from the oldest checkpoint if it runs out of disk
- * space.
+ * rows at @vclock or newer.
  */
 void
-wal_collect_garbage(const struct vclock *wal_vclock,
-		    const struct vclock *checkpoint_vclock);
+wal_collect_garbage(const struct vclock *vclock);
 
 void
 wal_init_vy_log();

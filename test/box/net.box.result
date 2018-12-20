@@ -1880,7 +1880,7 @@ greeting =
 socket = require('socket');
 ---
 ...
-srv = socket.tcp_server('localhost', 3392, {
+srv = socket.tcp_server('localhost', 0, {
     handler = function(fd)
         local fiber = require('fiber')
         fiber.sleep(0.1)
@@ -1890,7 +1890,8 @@ srv = socket.tcp_server('localhost', 3392, {
 ---
 ...
 -- we must get timeout
-nb = net.new('localhost:3392', {
+port = srv:name().port
+nb = net.new('localhost:' .. port, {
     wait_connected = true, console = true,
     connect_timeout = 0.01
 });
@@ -1904,7 +1905,7 @@ nb:close();
 ---
 ...
 -- we must get peer closed
-nb = net.new('localhost:3392', {
+nb = net.new('localhost:' .. port, {
     wait_connected = true, console = true,
     connect_timeout = 0.2
 });
@@ -2261,6 +2262,11 @@ box.session.on_disconnect(on_disconnect) == on_disconnect
 ---
 - true
 ...
+--
+-- gh-3859: on_disconnect is called only after all requests are
+-- processed, but should be called right after disconnect and
+-- only once.
+--
 ch1 = fiber.channel(1)
 ---
 ...
@@ -2283,20 +2289,26 @@ c:close()
 fiber.sleep(0)
 ---
 ...
-disconnected -- false
----
-- false
-...
-ch2:put(true)
----
-- true
-...
 while disconnected == false do fiber.sleep(0.01) end
 ---
 ...
 disconnected -- true
 ---
 - true
+...
+disconnected = nil
+---
+...
+ch2:put(true)
+---
+- true
+...
+fiber.sleep(0)
+---
+...
+disconnected -- nil, on_disconnect is not called second time.
+---
+- null
 ...
 box.session.on_disconnect(nil, on_disconnect)
 ---
@@ -3403,6 +3415,23 @@ ok, err
 ---
 - false
 - Connection closed
+...
+--
+-- gh-3856: wait_connected = false is ignored.
+--
+c = net.connect('8.8.8.8:123456', {wait_connected = false})
+---
+...
+c
+---
+- opts:
+    wait_connected: false
+  host: 8.8.8.8
+  state: initial
+  port: '123456'
+...
+c:close()
+---
 ...
 box.schema.func.drop('do_long')
 ---

@@ -273,14 +273,22 @@ enum rmean_net_name {
 const char *rmean_net_strings[IPROTO_LAST] = { "SENT", "RECEIVED" };
 
 static void
-tx_process_disconnect(struct cmsg *m);
+tx_process_destroy(struct cmsg *m);
 
 static void
-net_finish_disconnect(struct cmsg *m);
+net_finish_destroy(struct cmsg *m);
+
+static const struct cmsg_hop destroy_route[] = {
+	{ tx_process_destroy, &net_pipe },
+	{ net_finish_destroy, NULL },
+};
+
+/** Fire on_disconnect triggers in the tx thread. */
+static void
+tx_process_disconnect(struct cmsg *m);
 
 static const struct cmsg_hop disconnect_route[] = {
-	{ tx_process_disconnect, &net_pipe },
-	{ net_finish_disconnect, NULL },
+	{ tx_process_disconnect, NULL }
 };
 
 /**
@@ -399,10 +407,22 @@ struct iproto_connection
 	/** Logical session. */
 	struct session *session;
 	ev_loop *loop;
-	/* Pre-allocated disconnect msg. */
-	struct cmsg disconnect;
-	/** True if disconnect message is sent. Debug-only. */
-	bool is_disconnected;
+	/**
+	 * Pre-allocated disconnect msg. Is sent right after
+	 * actual disconnect has happened. Does not destroy the
+	 * connection. Used to notify existing requests about the
+	 * occasion.
+	 */
+	struct cmsg disconnect_msg;
+	/**
+	 * Pre-allocated destroy msg. Is sent after disconnect has
+	 * happened and a last request has finished. Firstly
+	 * destroys tx-related resources and then deletes the
+	 * connection.
+	 */
+	struct cmsg destroy_msg;
+	/** True if destroy message is sent. Debug-only. */
+	bool is_destroy_sent;
 	struct rlist in_stop_list;
 	/**
 	 * Kharon is used to implement box.session.push().
@@ -519,8 +539,9 @@ iproto_connection_is_idle(struct iproto_connection *con)
 static inline void
 iproto_connection_stop_readahead_limit(struct iproto_connection *con)
 {
-	say_warn("stopping input on connection %s, readahead limit is reached",
-		 sio_socketname(con->input.fd));
+	say_warn_ratelimited("stopping input on connection %s, "
+			     "readahead limit is reached",
+			     sio_socketname(con->input.fd));
 	assert(rlist_empty(&con->in_stop_list));
 	ev_io_stop(con->loop, &con->input);
 }
@@ -530,8 +551,9 @@ iproto_connection_stop_msg_max_limit(struct iproto_connection *con)
 {
 	assert(rlist_empty(&con->in_stop_list));
 
-	say_warn("stopping input on connection %s, net_msg_max limit is reached",
-		 sio_socketname(con->input.fd));
+	say_warn_ratelimited("stopping input on connection %s, "
+			     "net_msg_max limit is reached",
+			     sio_socketname(con->input.fd));
 	ev_io_stop(con->loop, &con->input);
 	/*
 	 * Important to add to tail and fetch from head to ensure
@@ -564,6 +586,7 @@ iproto_connection_close(struct iproto_connection *con)
 		 * is done only once.
 		 */
 		con->p_ibuf->wpos -= con->parse_size;
+		cpipe_push(&tx_pipe, &con->disconnect_msg);
 	}
 	/*
 	 * If the connection has no outstanding requests in the
@@ -578,9 +601,9 @@ iproto_connection_close(struct iproto_connection *con)
 	 * twice.
 	 */
 	if (iproto_connection_is_idle(con)) {
-		assert(con->is_disconnected == false);
-		con->is_disconnected = true;
-		cpipe_push(&tx_pipe, &con->disconnect);
+		assert(! con->is_destroy_sent);
+		con->is_destroy_sent = true;
+		cpipe_push(&tx_pipe, &con->destroy_msg);
 	}
 	rlist_del(&con->in_stop_list);
 }
@@ -859,6 +882,8 @@ iproto_connection_on_input(ev_loop *loop, struct ev_io *watcher,
 		/* Read input. */
 		int nrd = sio_read(fd, in->wpos, ibuf_unused(in));
 		if (nrd < 0) {                  /* Socket is not ready. */
+			if (! sio_wouldblock(errno))
+				diag_raise();
 			ev_io_start(loop, &con->input);
 			return;
 		}
@@ -924,9 +949,9 @@ iproto_flush(struct iproto_connection *con)
 
 	ssize_t nwr = sio_writev(fd, iov, iovcnt);
 
-	/* Count statistics */
-	rmean_collect(rmean_net, IPROTO_SENT, nwr);
 	if (nwr > 0) {
+		/* Count statistics */
+		rmean_collect(rmean_net, IPROTO_SENT, nwr);
 		if (begin->used + nwr == end->used) {
 			*begin = *end;
 			return 0;
@@ -938,6 +963,8 @@ iproto_flush(struct iproto_connection *con)
 		begin->iov_len = advance == 0 ? begin->iov_len + offset: offset;
 		begin->pos += advance;
 		assert(begin->pos <= end->pos);
+	} else if (nwr < 0 && ! sio_wouldblock(errno)) {
+		diag_raise();
 	}
 	return -1;
 }
@@ -994,8 +1021,9 @@ iproto_connection_new(int fd)
 	con->session = NULL;
 	rlist_create(&con->in_stop_list);
 	/* It may be very awkward to allocate at close. */
-	cmsg_init(&con->disconnect, disconnect_route);
-	con->is_disconnected = false;
+	cmsg_init(&con->destroy_msg, destroy_route);
+	cmsg_init(&con->disconnect_msg, disconnect_route);
+	con->is_destroy_sent = false;
 	con->tx.is_push_pending = false;
 	con->tx.is_push_sent = false;
 	return con;
@@ -1156,7 +1184,7 @@ iproto_msg_decode(struct iproto_msg *msg, const char **pos, const char *reqend,
 		cmsg_init(&msg->base, call_route);
 		break;
 	case IPROTO_EXECUTE:
-		if (xrow_decode_sql(&msg->header, &msg->sql, &fiber()->gc))
+		if (xrow_decode_sql(&msg->header, &msg->sql) != 0)
 			goto error;
 		cmsg_init(&msg->base, sql_route);
 		break;
@@ -1213,20 +1241,27 @@ tx_fiber_init(struct session *session, uint64_t sync)
 	fiber_set_user(f, &session->credentials);
 }
 
-/**
- * Fire on_disconnect triggers in the tx
- * thread and destroy the session object,
- * as well as output buffers of the connection.
- */
 static void
 tx_process_disconnect(struct cmsg *m)
 {
 	struct iproto_connection *con =
-		container_of(m, struct iproto_connection, disconnect);
-	if (con->session) {
+		container_of(m, struct iproto_connection, disconnect_msg);
+	if (con->session != NULL && !rlist_empty(&session_on_disconnect)) {
 		tx_fiber_init(con->session, 0);
-		if (! rlist_empty(&session_on_disconnect))
-			session_run_on_disconnect_triggers(con->session);
+		session_run_on_disconnect_triggers(con->session);
+	}
+}
+
+/**
+ * Destroy the session object, as well as output buffers of the
+ * connection.
+ */
+static void
+tx_process_destroy(struct cmsg *m)
+{
+	struct iproto_connection *con =
+		container_of(m, struct iproto_connection, destroy_msg);
+	if (con->session) {
 		session_destroy(con->session);
 		con->session = NULL; /* safety */
 	}
@@ -1243,10 +1278,10 @@ tx_process_disconnect(struct cmsg *m)
  * and close the connection.
  */
 static void
-net_finish_disconnect(struct cmsg *m)
+net_finish_destroy(struct cmsg *m)
 {
 	struct iproto_connection *con =
-		container_of(m, struct iproto_connection, disconnect);
+		container_of(m, struct iproto_connection, destroy_msg);
 	/* Runs the trigger, which may yield. */
 	iproto_connection_delete(con);
 }
@@ -1579,6 +1614,10 @@ tx_process_sql(struct cmsg *m)
 	struct iproto_msg *msg = tx_accept_msg(m);
 	struct obuf *out;
 	struct sql_response response;
+	struct sql_bind *bind;
+	int bind_count;
+	const char *sql;
+	uint32_t len;
 
 	tx_fiber_init(msg->connection->session, msg->header.sync);
 
@@ -1586,7 +1625,13 @@ tx_process_sql(struct cmsg *m)
 		goto error;
 	assert(msg->header.type == IPROTO_EXECUTE);
 	tx_inject_delay();
-	if (sql_prepare_and_execute(&msg->sql, &response, &fiber()->gc) != 0)
+	bind_count = sql_bind_list_decode(msg->sql.bind, &bind);
+	if (bind_count < 0)
+		goto error;
+	sql = msg->sql.sql_text;
+	sql = mp_decode_str(&sql, &len);
+	if (sql_prepare_and_execute(sql, len, bind, bind_count, &response,
+				    &fiber()->gc) != 0)
 		goto error;
 	/*
 	 * Take an obuf only after execute(). Else the buffer can
@@ -1602,7 +1647,8 @@ tx_process_sql(struct cmsg *m)
 		obuf_rollback_to_svp(out, &header_svp);
 		goto error;
 	}
-	iproto_reply_sql(out, &header_svp, response.sync, schema_version, keys);
+	iproto_reply_sql(out, &header_svp, msg->header.sync, schema_version,
+			 keys);
 	iproto_wpos_create(&msg->wpos, out);
 	return;
 error:
@@ -1760,14 +1806,14 @@ net_send_greeting(struct cmsg *m)
 	struct iproto_connection *con = msg->connection;
 	if (msg->close_connection) {
 		struct obuf *out = msg->wpos.obuf;
-		try {
-			int64_t nwr = sio_writev(con->output.fd, out->iov,
-						 obuf_iovcnt(out));
+		int64_t nwr = sio_writev(con->output.fd, out->iov,
+					 obuf_iovcnt(out));
 
-			/* Count statistics */
+		if (nwr > 0) {
+			/* Count statistics. */
 			rmean_collect(rmean_net, IPROTO_SENT, nwr);
-		} catch (Exception *e) {
-			e->log();
+		} else if (nwr < 0 && ! sio_wouldblock(errno)) {
+			diag_log();
 		}
 		assert(iproto_connection_is_idle(con));
 		iproto_connection_close(con);
@@ -1796,7 +1842,7 @@ static const struct cmsg_hop connect_route[] = {
 /**
  * Create a connection and start input.
  */
-static void
+static int
 iproto_on_accept(struct evio_service * /* service */, int fd,
 		 struct sockaddr *addr, socklen_t addrlen)
 {
@@ -1805,26 +1851,23 @@ iproto_on_accept(struct evio_service * /* service */, int fd,
 	struct iproto_msg *msg;
 	struct iproto_connection *con = iproto_connection_new(fd);
 	if (con == NULL)
-		goto error_conn;
+		return -1;
 	/*
 	 * Ignore msg allocation failure - the queue size is
 	 * fixed so there is a limited number of msgs in
 	 * use, all stored in just a few blocks of the memory pool.
 	 */
 	msg = iproto_msg_new(con);
-	if (msg == NULL)
-		goto error_msg;
+	if (msg == NULL) {
+		mempool_free(&iproto_connection_pool, con);
+		return -1;
+	}
 	cmsg_init(&msg->base, connect_route);
 	msg->p_ibuf = con->p_ibuf;
 	msg->wpos = con->wpos;
 	msg->close_connection = false;
 	cpipe_push(&tx_pipe, &msg->base);
-	return;
-error_msg:
-	mempool_free(&iproto_connection_pool, con);
-error_conn:
-	close(fd);
-	return;
+	return 0;
 }
 
 static struct evio_service binary; /* iproto binary listener */
@@ -2035,10 +2078,10 @@ iproto_do_cfg_f(struct cbus_call_msg *m)
 		case IPROTO_CFG_LISTEN:
 			if (evio_service_is_active(&binary))
 				evio_service_stop(&binary);
-			if (cfg_msg->uri != NULL) {
-				evio_service_bind(&binary, cfg_msg->uri);
-				evio_service_listen(&binary);
-			}
+			if (cfg_msg->uri != NULL &&
+			    (evio_service_bind(&binary, cfg_msg->uri) != 0 ||
+			     evio_service_listen(&binary) != 0))
+				diag_raise();
 			break;
 		default:
 			unreachable();

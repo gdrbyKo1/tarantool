@@ -38,9 +38,14 @@
 #include "tarantool_ev.h"
 #include "sio.h"
 #include "uri.h"
+
+#if defined(__cplusplus)
+extern "C" {
+#endif /* defined(__cplusplus) */
+
 /**
- * Exception-aware way to add a listening socket to the event
- * loop. Callbacks are invoked on bind and accept events.
+ * A way to add a listening socket to the event loop. Callbacks
+ * are invoked on bind and accept events.
  *
  * Coroutines/fibers are not used for port listeners
  * since listener's job is usually simple and only involves
@@ -62,6 +67,11 @@
  * If a service is not started, but only initialized, no
  * dedicated cleanup/destruction is necessary.
  */
+struct evio_service;
+
+typedef int (*evio_accept_f)(struct evio_service *, int, struct sockaddr *,
+			      socklen_t);
+
 struct evio_service
 {
 	/** Service name. E.g. 'primary', 'secondary', etc. */
@@ -79,12 +89,10 @@ struct evio_service
 
 	/**
 	 * A callback invoked on every accepted client socket.
-	 * It's OK to throw an exception in the callback:
-	 * when it happens, the exception is logged, and the
-	 * accepted socket is closed.
+	 * If a callback returned != 0, the accepted socket is
+	 * closed and the error is logged.
 	 */
-	void (*on_accept)(struct evio_service *, int,
-			  struct sockaddr *, socklen_t);
+	evio_accept_f on_accept;
 	void *on_accept_param;
 
 	/** libev io object for the acceptor socket. */
@@ -94,14 +102,11 @@ struct evio_service
 
 /** Initialize the service. Don't bind to the port yet. */
 void
-evio_service_init(ev_loop *loop,
-		  struct evio_service *service, const char *name,
-		  void (*on_accept)(struct evio_service *,
-				    int, struct sockaddr *, socklen_t),
-		  void *on_accept_param);
+evio_service_init(ev_loop *loop, struct evio_service *service, const char *name,
+		  evio_accept_f on_accept, void *on_accept_param);
 
 /** Bind service to specified uri */
-void
+int
 evio_service_bind(struct evio_service *service, const char *uri);
 
 /**
@@ -109,14 +114,14 @@ evio_service_bind(struct evio_service *service, const char *uri);
  *
  * @retval 0 for success
  */
-void
+int
 evio_service_listen(struct evio_service *service);
 
 /** If started, stop event flow and close the acceptor socket. */
 void
 evio_service_stop(struct evio_service *service);
 
-void
+int
 evio_socket(struct ev_io *coio, int domain, int type, int protocol);
 
 void
@@ -149,7 +154,11 @@ evio_timeout_update(ev_loop *loop, ev_tstamp start, ev_tstamp *delay)
 	*delay = (elapsed >= *delay) ? 0 : *delay - elapsed;
 }
 
-void
+int
 evio_setsockopt_client(int fd, int family, int type);
+
+#if defined(__cplusplus)
+} /* extern "C" */
+#endif /* defined(__cplusplus) */
 
 #endif /* TARANTOOL_EVIO_H_INCLUDED */

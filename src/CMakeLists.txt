@@ -25,6 +25,7 @@ lua_source(lua_sources lua/fiber.lua)
 lua_source(lua_sources lua/buffer.lua)
 lua_source(lua_sources lua/uuid.lua)
 lua_source(lua_sources lua/crypto.lua)
+lua_source(lua_sources lua/error.lua)
 lua_source(lua_sources lua/digest.lua)
 lua_source(lua_sources lua/msgpackffi.lua)
 lua_source(lua_sources lua/uri.lua)
@@ -88,8 +89,8 @@ set (core_sources
      fiber_cond.c
      fiber_channel.c
      latch.c
-     sio.cc
-     evio.cc
+     sio.c
+     evio.c
      coio.cc
      coio_task.c
      coio_file.c
@@ -107,6 +108,7 @@ set (core_sources
      coll.c
      coll_def.c
      mpstream.c
+     port.c
  )
 
 if (TARGET_OS_NETBSD)
@@ -173,12 +175,14 @@ set (server_sources
      lua/utils.c
      lua/errno.c
      lua/tnt_iconv.c
+     lua/error.c
      lua/socket.c
      lua/pickle.c
      lua/fio.c
      lua/crypto.c
      lua/httpc.c
      lua/utf8.c
+     lua/info.c
      ${lua_sources}
      ${PROJECT_SOURCE_DIR}/third_party/lua-yaml/lyaml.cc
      ${PROJECT_SOURCE_DIR}/third_party/lua-yaml/b64.c
@@ -195,6 +199,7 @@ set(api_headers
     ${CMAKE_SOURCE_DIR}/src/coio.h
     ${CMAKE_SOURCE_DIR}/src/coio_task.h
     ${CMAKE_SOURCE_DIR}/src/lua/utils.h
+    ${CMAKE_SOURCE_DIR}/src/lua/error.h
     ${CMAKE_SOURCE_DIR}/src/box/txn.h
     ${CMAKE_SOURCE_DIR}/src/box/key_def.h
     ${CMAKE_SOURCE_DIR}/src/box/field_def.h

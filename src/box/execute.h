@@ -51,30 +51,31 @@ extern const char *sql_info_key_strs[];
 struct obuf;
 struct region;
 struct sql_bind;
-struct xrow_header;
-
-/** EXECUTE request. */
-struct sql_request {
-	uint64_t sync;
-	/** SQL statement text. */
-	const char *sql_text;
-	/** Length of the SQL statement text. */
-	uint32_t sql_text_len;
-	/** Array of parameters. */
-	struct sql_bind *bind;
-	/** Length of the @bind. */
-	uint32_t bind_count;
-};
 
 /** Response on EXECUTE request. */
 struct sql_response {
-	/** Request sync. */
-	uint64_t sync;
 	/** Port with response data if any. */
 	struct port port;
 	/** Prepared SQL statement with metadata. */
 	void *prep_stmt;
 };
+
+/**
+ * Parse MessagePack array of SQL parameters.
+ * @param data MessagePack array of parameters. Each parameter
+ *        either must have scalar type, or must be a map with the
+ *        following format: {name: value}. Name - string name of
+ *        the named parameter, value - scalar value of the
+ *        parameter. Named and positioned parameters can be mixed.
+ *        For more details
+ *        @sa https://www.sqlite.org/lang_expr.html#varparam.
+ * @param[out] out_bind Pointer to save decoded parameters.
+ *
+ * @retval  >= 0 Number of decoded parameters.
+ * @retval -1 Client or memory error.
+ */
+int
+sql_bind_list_decode(const char *data, struct sql_bind **out_bind);
 
 /**
  * Dump a built response into @an out buffer. The response is
@@ -114,21 +115,11 @@ int
 sql_response_dump(struct sql_response *response, int *keys, struct obuf *out);
 
 /**
- * Parse the EXECUTE request.
- * @param row Encoded data.
- * @param[out] request Request to decode to.
- * @param region Allocator.
- *
- * @retval  0 Sucess.
- * @retval -1 Format or memory error.
- */
-int
-xrow_decode_sql(const struct xrow_header *row, struct sql_request *request,
-		struct region *region);
-
-/**
  * Prepare and execute an SQL statement.
- * @param request IProto request.
+ * @param sql SQL statement.
+ * @param len Length of @a sql.
+ * @param bind Array of parameters.
+ * @param bind_count Length of @a bind.
  * @param[out] response Response to store result.
  * @param region Runtime allocator for temporary objects
  *        (columns, tuples ...).
@@ -137,8 +128,9 @@ xrow_decode_sql(const struct xrow_header *row, struct sql_request *request,
  * @retval -1 Client or memory error.
  */
 int
-sql_prepare_and_execute(const struct sql_request *request,
-			struct sql_response *response, struct region *region);
+sql_prepare_and_execute(const char *sql, int len, const struct sql_bind *bind,
+			uint32_t bind_count, struct sql_response *response,
+			struct region *region);
 
 #if defined(__cplusplus)
 } /* extern "C" { */

@@ -87,7 +87,6 @@ static void title(const char *new_status)
 	systemd_snotify("STATUS=%s", status);
 }
 
-bool box_checkpoint_is_in_progress = false;
 const struct vclock *box_vclock = &replicaset.vclock;
 
 /**
@@ -849,6 +848,20 @@ box_set_checkpoint_count(void)
 	int checkpoint_count = cfg_geti("checkpoint_count");
 	box_check_checkpoint_count(checkpoint_count);
 	gc_set_min_checkpoint_count(checkpoint_count);
+}
+
+void
+box_set_checkpoint_interval(void)
+{
+	double interval = cfg_getd("checkpoint_interval");
+	gc_set_checkpoint_interval(interval);
+}
+
+void
+box_set_checkpoint_wal_threshold(void)
+{
+	int64_t threshold = cfg_geti64("checkpoint_wal_threshold");
+	wal_set_checkpoint_threshold(threshold);
 }
 
 void
@@ -1918,7 +1931,7 @@ local_recovery(const struct tt_uuid *instance_uuid,
 	 * so we must reflect this in replicaset vclock to
 	 * not attempt to apply these rows twice.
 	 */
-	recovery_scan(recovery, &replicaset.vclock);
+	recovery_scan(recovery, &replicaset.vclock, &gc.vclock);
 
 	if (wal_dir_lock >= 0) {
 		box_listen();
@@ -2011,6 +2024,19 @@ tx_prio_cb(struct ev_loop *loop, ev_watcher *watcher, int events)
 	cbus_process(endpoint);
 }
 
+static void
+on_wal_garbage_collection(const struct vclock *vclock)
+{
+	gc_advance(vclock);
+}
+
+static void
+on_wal_checkpoint_threshold(void)
+{
+	say_info("WAL threshold exceeded, triggering checkpoint");
+	gc_trigger_checkpoint();
+}
+
 void
 box_init(void)
 {
@@ -2067,7 +2093,6 @@ box_cfg_xc(void)
 	box_check_replicaset_uuid(&replicaset_uuid);
 
 	box_set_net_msg_max();
-	box_set_checkpoint_count();
 	box_set_too_long_threshold();
 	box_set_replication_timeout();
 	box_set_replication_connect_timeout();
@@ -2104,6 +2129,8 @@ box_cfg_xc(void)
 		/* Bootstrap a new master */
 		bootstrap(&instance_uuid, &replicaset_uuid,
 			  &is_bootstrap_leader);
+		checkpoint = gc_last_checkpoint();
+		assert(checkpoint != NULL);
 	}
 	fiber_gc();
 
@@ -2117,19 +2144,16 @@ box_cfg_xc(void)
 		}
 	}
 
-	struct gc_checkpoint *first_checkpoint = gc_first_checkpoint();
-	assert(first_checkpoint != NULL);
-
 	/* Start WAL writer */
 	int64_t wal_max_rows = box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
 	int64_t wal_max_size = box_check_wal_max_size(cfg_geti64("wal_max_size"));
 	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
 	if (wal_init(wal_mode, cfg_gets("wal_dir"), wal_max_rows,
 		     wal_max_size, &INSTANCE_UUID, &replicaset.vclock,
-		     &first_checkpoint->vclock) != 0) {
+		     &checkpoint->vclock, on_wal_garbage_collection,
+		     on_wal_checkpoint_threshold) != 0) {
 		diag_raise();
 	}
-	gc_set_wal_watcher();
 
 	rmean_cleanup(rmean_box);
 
@@ -2178,32 +2202,8 @@ box_checkpoint()
 	/* Signal arrived before box.cfg{} */
 	if (! is_box_configured)
 		return 0;
-	int rc = 0;
-	if (box_checkpoint_is_in_progress) {
-		diag_set(ClientError, ER_CHECKPOINT_IN_PROGRESS);
-		return -1;
-	}
-	box_checkpoint_is_in_progress = true;
-	/* create checkpoint files */
-	latch_lock(&schema_lock);
-	if ((rc = engine_begin_checkpoint()))
-		goto end;
 
-	struct vclock vclock;
-	if ((rc = wal_checkpoint(&vclock, true))) {
-		tnt_error(ClientError, ER_CHECKPOINT_ROLLBACK);
-		goto end;
-	}
-	rc = engine_commit_checkpoint(&vclock);
-end:
-	if (rc)
-		engine_abort_checkpoint();
-	else
-		gc_add_checkpoint(&vclock);
-
-	latch_unlock(&schema_lock);
-	box_checkpoint_is_in_progress = false;
-	return rc;
+	return gc_checkpoint();
 }
 
 int

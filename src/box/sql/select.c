@@ -229,18 +229,18 @@ sql_select_delete(sqlite3 *db, Select *p)
 }
 
 int
-sql_select_from_table_count(const struct Select *select)
+sql_src_list_entry_count(const struct SrcList *list)
 {
-	assert(select != NULL && select->pSrc != NULL);
-	return select->pSrc->nSrc;
+	assert(list != NULL);
+	return list->nSrc;
 }
 
 const char *
-sql_select_from_table_name(const struct Select *select, int i)
+sql_src_list_entry_name(const struct SrcList *list, int i)
 {
-	assert(select != NULL && select->pSrc != NULL);
-	assert(i >= 0 && i < select->pSrc->nSrc);
-	return select->pSrc->a[i].zName;
+	assert(list != NULL);
+	assert(i >= 0 && i < list->nSrc);
+	return list->a[i].zName;
 }
 
 /*
@@ -258,7 +258,9 @@ findRightmost(Select * p)
 /**
  * Work the same as sqlite3SrcListAppend(), but before adding to
  * list provide check on name duplicates: only values with unique
- * names are appended.
+ * names are appended. Moreover, names of tables are not
+ * normalized: it is parser's business and in struct Select they
+ * are already in uppercased or unquoted form.
  *
  * @param db Database handler.
  * @param list List of entries.
@@ -277,45 +279,54 @@ src_list_append_unique(struct sqlite3 *db, struct SrcList *list,
 		if (name != NULL && strcmp(new_name, name) == 0)
 			return list;
 	}
-	struct Token token = { new_name, strlen(new_name), 0 };
-	return sqlite3SrcListAppend(db, list, &token);
-}
-
-/**
- * This function is an inner call of recursive traverse through
- * select AST starting from interface function
- * sql_select_expand_from_tables().
- *
- * @param top_select The root of AST.
- * @param sub_select sub-select of current level recursion.
- */
-static void
-expand_names_sub_select(struct Select *top_select, struct Select *sub_select)
-{
-	assert(top_select != NULL);
-	assert(sub_select != NULL);
-	struct SrcList_item *sub_src = sub_select->pSrc->a;
-	for (int i = 0; i < sub_select->pSrc->nSrc; ++i, ++sub_src) {
-		if (sub_src->zName == NULL) {
-			expand_names_sub_select(top_select, sub_src->pSelect);
-		} else {
-			top_select->pSrc =
-				src_list_append_unique(sql_get(),
-						       top_select->pSrc,
-						       sub_src->zName);
-		}
+	list = sqlite3SrcListEnlarge(db, list, 1, list->nSrc);
+	if (db->mallocFailed) {
+		sqlite3SrcListDelete(db, list);
+		return NULL;
 	}
+	struct SrcList_item *pItem = &list->a[list->nSrc - 1];
+	pItem->zName = sqlite3DbStrNDup(db, new_name, strlen(new_name));
+	if (pItem->zName == NULL) {
+		sqlite3SrcListDelete(db, list);
+		return NULL;
+	}
+	return list;
 }
 
-void
+static int
+select_collect_table_names(struct Walker *walker, struct Select *select)
+{
+	assert(walker != NULL);
+	assert(select != NULL);
+	for (int i = 0; i < select->pSrc->nSrc; ++i) {
+		if (select->pSrc->a[i].zName == NULL)
+			continue;
+		walker->u.pSrcList =
+			src_list_append_unique(sql_get(), walker->u.pSrcList,
+					       select->pSrc->a[i].zName);
+		if (walker->u.pSrcList == NULL)
+			return WRC_Abort;
+	}
+	return WRC_Continue;
+}
+
+struct SrcList *
 sql_select_expand_from_tables(struct Select *select)
 {
 	assert(select != NULL);
-	struct SrcList_item *src = select->pSrc->a;
-	for (int i = 0; i < select->pSrc->nSrc; ++i, ++src) {
-		if (select->pSrc->a[i].zName == NULL)
-			expand_names_sub_select(select, src->pSelect);
+	struct Walker walker;
+	struct SrcList *table_names = sql_alloc_src_list(sql_get());
+	if (table_names == NULL)
+		return NULL;
+	memset(&walker, 0, sizeof(walker));
+	walker.xExprCallback = sqlite3ExprWalkNoop;
+	walker.xSelectCallback = select_collect_table_names;
+	walker.u.pSrcList = table_names;
+	if (sqlite3WalkSelect(&walker, select) != 0) {
+		sqlite3SrcListDelete(sql_get(), walker.u.pSrcList);
+		return NULL;
 	}
+	return walker.u.pSrcList;
 }
 
 /*
@@ -1871,6 +1882,8 @@ sqlite3ColumnsFromExprList(Parse * parse, ExprList * expr_list, Table *table)
 				zName = expr_list->a[i].zSpan;
 			}
 		}
+		if (zName == NULL)
+			zName = "_auto_field_";
 		zName = sqlite3MPrintf(db, "%s", zName);
 
 		/* Make sure the column name is unique.  If the name is not unique,
@@ -1883,13 +1896,11 @@ sqlite3ColumnsFromExprList(Parse * parse, ExprList * expr_list, Table *table)
 				int j;
 				for (j = nName - 1;
 				     j > 0 && sqlite3Isdigit(zName[j]); j--);
-				if (zName[j] == ':')
+				if (zName[j] == '_')
 					nName = j;
 			}
 			zName =
-			    sqlite3MPrintf(db, "%.*z:%u", nName, zName, ++cnt);
-			if (cnt > 3)
-				sqlite3_randomness(sizeof(cnt), &cnt);
+			    sqlite3MPrintf(db, "%.*z_%u", nName, zName, ++cnt);
 		}
 		size_t name_len = strlen(zName);
 		void *field = &table->def->fields[i];

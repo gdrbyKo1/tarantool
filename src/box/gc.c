@@ -39,20 +39,32 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 #define RB_COMPACT 1
 #include <small/rb.h>
 #include <small/rlist.h>
+#include <tarantool_ev.h>
 
 #include "diag.h"
-#include "say.h"
+#include "errcode.h"
+#include "fiber.h"
+#include "fiber_cond.h"
 #include "latch.h"
+#include "say.h"
 #include "vclock.h"
 #include "cbus.h"
+#include "schema.h"
 #include "engine.h"		/* engine_collect_garbage() */
 #include "wal.h"		/* wal_collect_garbage() */
+#include "checkpoint_schedule.h"
 
 struct gc_state gc;
+
+static int
+gc_cleanup_fiber_f(va_list);
+static int
+gc_checkpoint_fiber_f(va_list);
 
 /**
  * Comparator used for ordering gc_consumer objects by signature
@@ -100,27 +112,20 @@ gc_init(void)
 	vclock_create(&gc.vclock);
 	rlist_create(&gc.checkpoints);
 	gc_tree_new(&gc.consumers);
-	latch_create(&gc.latch);
-}
+	fiber_cond_create(&gc.cleanup_cond);
+	checkpoint_schedule_cfg(&gc.checkpoint_schedule, 0, 0);
 
-static void
-gc_process_wal_event(struct wal_watcher_msg *);
+	gc.cleanup_fiber = fiber_new("gc", gc_cleanup_fiber_f);
+	if (gc.cleanup_fiber == NULL)
+		panic("failed to start garbage collection fiber");
 
-void
-gc_set_wal_watcher(void)
-{
-	/*
-	 * Since the function is called from box_cfg() it is
-	 * important that we do not pass a message processing
-	 * callback to wal_set_watcher(). Doing so would cause
-	 * credentials corruption in the fiber executing
-	 * box_cfg() in case it processes some iproto messages.
-	 * Besides, by the time the function is called
-	 * tx_fiber_pool is already set up and it will process
-	 * all the messages directed to "tx" endpoint safely.
-	 */
-	wal_set_watcher(&gc.wal_watcher, "tx", gc_process_wal_event,
-			NULL, WAL_EVENT_GC);
+	gc.checkpoint_fiber = fiber_new("checkpoint_daemon",
+					gc_checkpoint_fiber_f);
+	if (gc.checkpoint_fiber == NULL)
+		panic("failed to start checkpoint daemon fiber");
+
+	fiber_start(gc.cleanup_fiber);
+	fiber_start(gc.checkpoint_fiber);
 }
 
 void
@@ -154,7 +159,7 @@ gc_free(void)
  * this function is specified by box.cfg.checkpoint_count.
  */
 static void
-gc_run(void)
+gc_run_cleanup(void)
 {
 	bool run_wal_gc = false;
 	bool run_engine_gc = false;
@@ -202,13 +207,6 @@ gc_run(void)
 		return; /* nothing to do */
 
 	/*
-	 * Engine callbacks may sleep, because they use coio for
-	 * removing files. Make sure we won't try to remove the
-	 * same file multiple times by serializing concurrent gc
-	 * executions.
-	 */
-	latch_lock(&gc.latch);
-	/*
 	 * Run garbage collection.
 	 *
 	 * The order is important here: we must invoke garbage
@@ -218,27 +216,73 @@ gc_run(void)
 	int rc = 0;
 	if (run_engine_gc)
 		rc = engine_collect_garbage(&checkpoint->vclock);
-	/*
-	 * Run wal_collect_garbage() even if we don't need to
-	 * delete any WAL files, because we have to apprise
-	 * the WAL thread of the oldest checkpoint signature.
-	 */
-	if (rc == 0)
-		wal_collect_garbage(vclock, &checkpoint->vclock);
-	latch_unlock(&gc.latch);
+	if (run_wal_gc && rc == 0)
+		wal_collect_garbage(vclock);
+}
+
+static int
+gc_cleanup_fiber_f(va_list ap)
+{
+	(void)ap;
+	while (!fiber_is_cancelled()) {
+		int delta = gc.cleanup_scheduled - gc.cleanup_completed;
+		if (delta == 0) {
+			/* No pending garbage collection. */
+			fiber_sleep(TIMEOUT_INFINITY);
+			continue;
+		}
+		assert(delta > 0);
+		gc_run_cleanup();
+		gc.cleanup_completed += delta;
+		fiber_cond_signal(&gc.cleanup_cond);
+	}
+	return 0;
 }
 
 /**
- * Deactivate consumers that need files deleted by the WAL thread.
+ * Trigger asynchronous garbage collection.
  */
 static void
-gc_process_wal_event(struct wal_watcher_msg *msg)
+gc_schedule_cleanup(void)
 {
-	assert((msg->events & WAL_EVENT_GC) != 0);
+	/*
+	 * Do not wake up the background fiber if it's executing
+	 * the garbage collection procedure right now, because
+	 * it may be waiting for a cbus message, which doesn't
+	 * tolerate spurious wakeups. Just increment the counter
+	 * then - it will rerun garbage collection as soon as
+	 * the current round completes.
+	 */
+	if (gc.cleanup_scheduled++ == gc.cleanup_completed)
+		fiber_wakeup(gc.cleanup_fiber);
+}
+
+/**
+ * Wait for background garbage collection scheduled prior
+ * to this point to complete.
+ */
+static void
+gc_wait_cleanup(void)
+{
+	unsigned scheduled = gc.cleanup_scheduled;
+	while (gc.cleanup_completed < scheduled)
+		fiber_cond_wait(&gc.cleanup_cond);
+}
+
+void
+gc_advance(const struct vclock *vclock)
+{
+	/*
+	 * In case of emergency ENOSPC, the WAL thread may delete
+	 * WAL files needed to restore from backup checkpoints,
+	 * which would be kept by the garbage collector otherwise.
+	 * Bring the garbage collector vclock up to date.
+	 */
+	vclock_copy(&gc.vclock, vclock);
 
 	struct gc_consumer *consumer = gc_tree_first(&gc.consumers);
 	while (consumer != NULL &&
-	       vclock_sum(&consumer->vclock) < vclock_sum(&msg->gc_vclock)) {
+	       vclock_sum(&consumer->vclock) < vclock_sum(vclock)) {
 		struct gc_consumer *next = gc_tree_next(&gc.consumers,
 							consumer);
 		assert(!consumer->is_inactive);
@@ -252,13 +296,30 @@ gc_process_wal_event(struct wal_watcher_msg *msg)
 
 		consumer = next;
 	}
-	gc_run();
+	gc_schedule_cleanup();
 }
 
 void
 gc_set_min_checkpoint_count(int min_checkpoint_count)
 {
 	gc.min_checkpoint_count = min_checkpoint_count;
+}
+
+void
+gc_set_checkpoint_interval(double interval)
+{
+	/*
+	 * Reconfigure the schedule and wake up the checkpoint
+	 * daemon so that it can readjust.
+	 *
+	 * Note, we must not wake up the checkpoint daemon fiber
+	 * if it's waiting for checkpointing to complete, because
+	 * checkpointing code doesn't tolerate spurious wakeups.
+	 */
+	checkpoint_schedule_cfg(&gc.checkpoint_schedule,
+				ev_monotonic_now(loop()), interval);
+	if (!gc.checkpoint_is_in_progress)
+		fiber_wakeup(gc.checkpoint_fiber);
 }
 
 void
@@ -273,7 +334,7 @@ gc_add_checkpoint(const struct vclock *vclock)
 		 * Rerun the garbage collector in this case, just
 		 * in case box.cfg.checkpoint_count has changed.
 		 */
-		gc_run();
+		gc_schedule_cleanup();
 		return;
 	}
 	assert(last_checkpoint == NULL ||
@@ -292,7 +353,143 @@ gc_add_checkpoint(const struct vclock *vclock)
 	rlist_add_tail_entry(&gc.checkpoints, checkpoint, in_checkpoints);
 	gc.checkpoint_count++;
 
-	gc_run();
+	gc_schedule_cleanup();
+}
+
+static int
+gc_do_checkpoint(void)
+{
+	int rc;
+	struct wal_checkpoint checkpoint;
+
+	assert(!gc.checkpoint_is_in_progress);
+	gc.checkpoint_is_in_progress = true;
+
+	/*
+	 * We don't support DDL operations while making a checkpoint.
+	 * Lock them out.
+	 */
+	latch_lock(&schema_lock);
+
+	/*
+	 * Rotate WAL and call engine callbacks to create a checkpoint
+	 * on disk for each registered engine.
+	 */
+	rc = engine_begin_checkpoint();
+	if (rc != 0)
+		goto out;
+	rc = wal_begin_checkpoint(&checkpoint);
+	if (rc != 0)
+		goto out;
+	rc = engine_commit_checkpoint(&checkpoint.vclock);
+	if (rc != 0)
+		goto out;
+	wal_commit_checkpoint(&checkpoint);
+
+	/*
+	 * Finally, track the newly created checkpoint in the garbage
+	 * collector state.
+	 */
+	gc_add_checkpoint(&checkpoint.vclock);
+out:
+	if (rc != 0)
+		engine_abort_checkpoint();
+
+	latch_unlock(&schema_lock);
+	gc.checkpoint_is_in_progress = false;
+	return rc;
+}
+
+int
+gc_checkpoint(void)
+{
+	if (gc.checkpoint_is_in_progress) {
+		diag_set(ClientError, ER_CHECKPOINT_IN_PROGRESS);
+		return -1;
+	}
+
+	/*
+	 * Reset the schedule and wake up the checkpoint daemon
+	 * so that it can readjust.
+	 */
+	checkpoint_schedule_reset(&gc.checkpoint_schedule,
+				  ev_monotonic_now(loop()));
+	fiber_wakeup(gc.checkpoint_fiber);
+
+	if (gc_do_checkpoint() != 0)
+		return -1;
+
+	/*
+	 * Wait for background garbage collection that might
+	 * have been triggered by this checkpoint to complete.
+	 * Strictly speaking, it isn't necessary, but it
+	 * simplifies testing as it guarantees that by the
+	 * time box.snapshot() returns, all outdated checkpoint
+	 * files have been removed.
+	 */
+	gc_wait_cleanup();
+	return 0;
+}
+
+void
+gc_trigger_checkpoint(void)
+{
+	if (gc.checkpoint_is_in_progress || gc.checkpoint_is_pending)
+		return;
+
+	gc.checkpoint_is_pending = true;
+	checkpoint_schedule_reset(&gc.checkpoint_schedule,
+				  ev_monotonic_now(loop()));
+	fiber_wakeup(gc.checkpoint_fiber);
+}
+
+static int
+gc_checkpoint_fiber_f(va_list ap)
+{
+	(void)ap;
+
+	/*
+	 * Make the fiber non-cancellable so as not to bother
+	 * about spurious wakeups.
+	 */
+	fiber_set_cancellable(false);
+
+	struct checkpoint_schedule *sched = &gc.checkpoint_schedule;
+	while (!fiber_is_cancelled()) {
+		double timeout = checkpoint_schedule_timeout(sched,
+					ev_monotonic_now(loop()));
+		if (timeout > 0) {
+			char buf[128];
+			struct tm tm;
+			time_t time = (time_t)(ev_now(loop()) + timeout);
+			localtime_r(&time, &tm);
+			strftime(buf, sizeof(buf), "%c", &tm);
+			say_info("scheduled next checkpoint for %s", buf);
+		} else {
+			/* Periodic checkpointing is disabled. */
+			timeout = TIMEOUT_INFINITY;
+		}
+		if (!fiber_yield_timeout(timeout) &&
+		    !gc.checkpoint_is_pending) {
+			/*
+			 * The checkpoint schedule has changed.
+			 * Reschedule the next checkpoint.
+			 */
+			continue;
+		}
+		/* Time to make the next scheduled checkpoint. */
+		gc.checkpoint_is_pending = false;
+		if (gc.checkpoint_is_in_progress) {
+			/*
+			 * Another fiber is making a checkpoint.
+			 * Skip this one.
+			 */
+			continue;
+		}
+		if (gc_do_checkpoint() != 0)
+			diag_log();
+	}
+	return 0;
 }
 
 void
@@ -311,7 +508,7 @@ void
 gc_unref_checkpoint(struct gc_checkpoint_ref *ref)
 {
 	rlist_del_entry(ref, in_refs);
-	gc_run();
+	gc_schedule_cleanup();
 }
 
 struct gc_consumer *
@@ -339,7 +536,7 @@ gc_consumer_unregister(struct gc_consumer *consumer)
 {
 	if (!consumer->is_inactive) {
 		gc_tree_remove(&gc.consumers, consumer);
-		gc_run();
+		gc_schedule_cleanup();
 	}
 	gc_consumer_delete(consumer);
 }
@@ -373,7 +570,7 @@ gc_consumer_advance(struct gc_consumer *consumer, const struct vclock *vclock)
 	if (update_tree)
 		gc_tree_insert(&gc.consumers, consumer);
 
-	gc_run();
+	gc_schedule_cleanup();
 }
 
 struct gc_consumer *

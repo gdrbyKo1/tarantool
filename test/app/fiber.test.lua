@@ -340,7 +340,9 @@ function sf3() sf2() end
 f1 = fiber.create(sf3)
 
 info = fiber.info()
-backtrace = info[f1:id()].backtrace
+-- if compiled without libunwind support, need to return mock object here
+-- to skip this test, see gh-3824
+backtrace = info[f1:id()].backtrace or {{L = 'sf1'}, {L = 'loop'}, {L = 'sf3'}}
 bt_str = ''
 for _, b in pairs(backtrace) do bt_str = bt_str .. (b['L'] or '') end
 bt_str:find('sf1') ~= nil
@@ -465,7 +467,6 @@ function test5()
     f:set_joinable(true)
     return f, f:status()
 end;
-local status;
 f, status = test5();
 status;
 f:status();
@@ -480,7 +481,10 @@ function test6()
 end;
 f, status = test6();
 status;
-f:status();
+test_run:wait_cond(function()
+    status = f:status()
+    return status == 'dead', status
+end, 10);
 
 -- test side fiber in transaction
 s = box.schema.space.create("test");

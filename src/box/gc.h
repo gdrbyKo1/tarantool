@@ -31,18 +31,20 @@
  * SUCH DAMAGE.
  */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <small/rlist.h>
 
+#include "fiber_cond.h"
 #include "vclock.h"
-#include "latch.h"
-#include "wal.h"
 #include "trivia/util.h"
+#include "checkpoint_schedule.h"
 
 #if defined(__cplusplus)
 extern "C" {
 #endif /* defined(__cplusplus) */
 
+struct fiber;
 struct gc_consumer;
 
 enum { GC_NAME_MAX = 64 };
@@ -121,16 +123,39 @@ struct gc_state {
 	struct rlist checkpoints;
 	/** Registered consumers, linked by gc_consumer::node. */
 	gc_tree_t consumers;
+	/** Fiber responsible for periodic checkpointing. */
+	struct fiber *checkpoint_fiber;
+	/** Schedule of periodic checkpoints. */
+	struct checkpoint_schedule checkpoint_schedule;
+	/** Fiber that removes old files in the background. */
+	struct fiber *cleanup_fiber;
 	/**
-	 * Latch serializing concurrent invocations of engine
-	 * garbage collection callbacks.
+	 * Condition variable signaled by the cleanup fiber
+	 * whenever it completes a round of garbage collection.
+	 * Used to wait for garbage collection to complete.
 	 */
-	struct latch latch;
+	struct fiber_cond cleanup_cond;
 	/**
-	 * WAL event watcher. Needed to shoot off stale consumers
-	 * when a WAL file is deleted due to ENOSPC.
+	 * The following two members are used for scheduling
+	 * background garbage collection and waiting for it to
+	 * complete. To trigger background garbage collection,
+	 * @scheduled is incremented. Whenever a round of garbage
+	 * collection completes, @completed is incremented. Thus
+	 * to wait for background garbage collection scheduled
+	 * at a particular moment of time to complete, one should
+	 * sleep until @completed reaches the value of @scheduled
+	 * taken at that moment of time.
 	 */
-	struct wal_watcher wal_watcher;
+	unsigned cleanup_completed, cleanup_scheduled;
+	/**
+	 * Set if there's a fiber making a checkpoint right now.
+	 */
+	bool checkpoint_is_in_progress;
+	/**
+	 * If this flag is set, the checkpoint daemon should create
+	 * a checkpoint as soon as possible despite the schedule.
+	 */
+	bool checkpoint_is_pending;
 };
 extern struct gc_state gc;
 
@@ -156,20 +181,6 @@ extern struct gc_state gc;
 	rlist_foreach_entry(ref, &(checkpoint)->refs, in_refs)
 
 /**
- * Return the first (oldest) checkpoint known to the garbage
- * collector. If there's no checkpoint, return NULL.
- */
-static inline struct gc_checkpoint *
-gc_first_checkpoint(void)
-{
-	if (rlist_empty(&gc.checkpoints))
-		return NULL;
-
-	return rlist_first_entry(&gc.checkpoints, struct gc_checkpoint,
-				 in_checkpoints);
-}
-
-/**
  * Return the last (newest) checkpoint known to the garbage
  * collector. If there's no checkpoint, return NULL.
  */
@@ -190,16 +201,17 @@ void
 gc_init(void);
 
 /**
- * Set WAL watcher. Called after WAL is initialized.
- */
-void
-gc_set_wal_watcher(void);
-
-/**
  * Destroy the garbage collection state.
  */
 void
 gc_free(void);
+
+/**
+ * Advance the garbage collector vclock to the given position.
+ * Deactivate WAL consumers that need older data.
+ */
+void
+gc_advance(const struct vclock *vclock);
 
 /**
  * Update the minimal number of checkpoints to preserve.
@@ -213,12 +225,39 @@ void
 gc_set_min_checkpoint_count(int min_checkpoint_count);
 
 /**
- * Track a new checkpoint in the garbage collector state.
- * Note, this function may run garbage collector to remove
+ * Set the time interval between checkpoints, in seconds.
+ * Setting the interval to 0 disables periodic checkpointing.
+ */
+void
+gc_set_checkpoint_interval(double interval);
+
+/**
+ * Track an existing checkpoint in the garbage collector state.
+ * Note, this function may trigger garbage collection to remove
  * old checkpoints.
  */
 void
 gc_add_checkpoint(const struct vclock *vclock);
+
+/**
+ * Make a checkpoint.
+ *
+ * This function runs engine/WAL callbacks to create a checkpoint
+ * on disk, then tracks the new checkpoint in the garbage collector
+ * state (see gc_add_checkpoint()).
+ *
+ * Returns 0 on success. On failure returns -1 and sets diag.
+ */
+int
+gc_checkpoint(void);
+
+/**
+ * Trigger background checkpointing.
+ *
+ * The checkpoint will be created by the checkpoint daemon.
+ */
+void
+gc_trigger_checkpoint(void);
 
 /**
  * Get a reference to @checkpoint and store it in @ref.

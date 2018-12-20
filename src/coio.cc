@@ -35,6 +35,7 @@
 #include <netinet/tcp.h>
 #include <stdio.h>
 #include <arpa/inet.h>
+#include <errno.h>
 
 #include "sio.h"
 #include "scoped_guard.h"
@@ -77,7 +78,8 @@ coio_connect_addr(struct ev_io *coio, struct sockaddr *addr,
 		  socklen_t len, ev_tstamp timeout)
 {
 	ev_loop *loop = loop();
-	evio_socket(coio, addr->sa_family, SOCK_STREAM, 0);
+	if (evio_socket(coio, addr->sa_family, SOCK_STREAM, 0) != 0)
+		diag_raise();
 	auto coio_guard = make_scoped_guard([=]{ evio_close(loop, coio); });
 	if (sio_connect(coio->fd, addr, len) == 0) {
 		coio_guard.is_active = false;
@@ -254,10 +256,15 @@ coio_accept(struct ev_io *coio, struct sockaddr *addr,
 		 * available */
 		int fd = sio_accept(coio->fd, addr, &addrlen);
 		if (fd >= 0) {
-			evio_setsockopt_client(fd, addr->sa_family,
-					       SOCK_STREAM);
+			if (evio_setsockopt_client(fd, addr->sa_family,
+						   SOCK_STREAM) != 0) {
+				close(fd);
+				diag_raise();
+			}
 			return fd;
 		}
+		if (! sio_wouldblock(errno))
+			diag_raise();
 		/* The socket is not ready, yield */
 		if (! ev_is_active(coio)) {
 			ev_io_set(coio, coio->fd, EV_READ);
@@ -313,6 +320,8 @@ coio_read_ahead_timeout(struct ev_io *coio, void *buf, size_t sz,
 		} else if (nrd == 0) {
 			errno = 0;
 			return sz - to_read;
+		} else if (! sio_wouldblock(errno)) {
+			diag_raise();
 		}
 
 		/* The socket is not ready, yield */
@@ -404,6 +413,8 @@ coio_write_timeout(struct ev_io *coio, const void *buf, size_t sz,
 				return sz;
 			towrite -= nwr;
 			buf = (char *) buf + nwr;
+		} else if (nwr < 0 && !sio_wouldblock(errno)) {
+			diag_raise();
 		}
 		if (! ev_is_active(coio)) {
 			ev_io_set(coio, coio->fd, EV_WRITE);
@@ -433,15 +444,11 @@ coio_write_timeout(struct ev_io *coio, const void *buf, size_t sz,
 static inline ssize_t
 coio_flush(int fd, struct iovec *iov, ssize_t offset, int iovcnt)
 {
-	ssize_t nwr;
-	try {
-		sio_add_to_iov(iov, -offset);
-		nwr = sio_writev(fd, iov, iovcnt);
-		sio_add_to_iov(iov, offset);
-	} catch (SocketError *e) {
-		sio_add_to_iov(iov, offset);
-		throw;
-	}
+	sio_add_to_iov(iov, -offset);
+	ssize_t nwr = sio_writev(fd, iov, iovcnt);
+	sio_add_to_iov(iov, offset);
+	if (nwr < 0 && ! sio_wouldblock(errno))
+		diag_raise();
 	return nwr;
 }
 
@@ -522,6 +529,8 @@ coio_sendto_timeout(struct ev_io *coio, const void *buf, size_t sz, int flags,
 					 flags, dest_addr, addrlen);
 		if (nwr > 0)
 			return nwr;
+		if (nwr < 0 && ! sio_wouldblock(errno))
+			diag_raise();
 		if (! ev_is_active(coio)) {
 			ev_io_set(coio, coio->fd, EV_WRITE);
 			ev_io_start(loop(), coio);
@@ -565,7 +574,8 @@ coio_recvfrom_timeout(struct ev_io *coio, void *buf, size_t sz, int flags,
 					   src_addr, &addrlen);
 		if (nrd >= 0)
 			return nrd;
-
+		if (! sio_wouldblock(errno))
+			diag_raise();
 		if (! ev_is_active(coio)) {
 			ev_io_set(coio, coio->fd, EV_READ);
 			ev_io_start(loop(), coio);
@@ -584,15 +594,12 @@ coio_recvfrom_timeout(struct ev_io *coio, void *buf, size_t sz, int flags,
 	}
 }
 
-void
+static int
 coio_service_on_accept(struct evio_service *evio_service,
 		       int fd, struct sockaddr *addr, socklen_t addrlen)
 {
 	struct coio_service *service = (struct coio_service *)
 			evio_service->on_accept_param;
-	struct ev_io coio;
-
-	coio_create(&coio, fd);
 
 	/* Set connection name. */
 	char fiber_name[SERVICE_NAME_MAXLEN];
@@ -600,15 +607,14 @@ coio_service_on_accept(struct evio_service *evio_service,
 		 "%s/%s", evio_service->name, sio_strfaddr(addr, addrlen));
 
 	/* Create the worker fiber. */
-	struct fiber *f;
-	try {
-		f = fiber_new_xc(fiber_name, service->handler);
-	} catch (struct error *e) {
-		error_log(e);
+	struct fiber *f = fiber_new(fiber_name, service->handler);
+	if (f == NULL) {
+		diag_log();
 		say_error("can't create a handler fiber, dropping client connection");
-		evio_close(loop(), &coio);
-		throw;
+		return -1;
 	}
+	struct ev_io coio;
+	coio_create(&coio, fd);
 	/*
 	 * The coio is passed into the created fiber, reset the
 	 * libev callback param to point at it.
@@ -619,6 +625,7 @@ coio_service_on_accept(struct evio_service *evio_service,
 	 * and will have to close it and free before termination.
 	 */
 	fiber_start(f, coio, addr, addrlen, service->handler_param);
+	return 0;
 }
 
 void
@@ -634,8 +641,9 @@ coio_service_init(struct coio_service *service, const char *name,
 void
 coio_service_start(struct evio_service *service, const char *uri)
 {
-	evio_service_bind(service, uri);
-	evio_service_listen(service);
+	if (evio_service_bind(service, uri) != 0 ||
+	    evio_service_listen(service) != 0)
+		diag_raise();
 }
 
 void

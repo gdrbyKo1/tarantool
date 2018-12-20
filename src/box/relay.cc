@@ -406,12 +406,9 @@ relay_schedule_pending_gc(struct relay *relay, const struct vclock *vclock)
 }
 
 static void
-relay_process_wal_event(struct wal_watcher_msg *msg)
+relay_process_wal_event(struct wal_watcher *watcher, unsigned events)
 {
-	assert((msg->events & (WAL_EVENT_WRITE | WAL_EVENT_ROTATE)) != 0);
-
-	struct relay *relay = container_of(msg->watcher, struct relay,
-					   wal_watcher);
+	struct relay *relay = container_of(watcher, struct relay, wal_watcher);
 	if (relay->state != RELAY_FOLLOW) {
 		/*
 		 * Do not try to send anything to the replica
@@ -421,7 +418,7 @@ relay_process_wal_event(struct wal_watcher_msg *msg)
 	}
 	try {
 		recover_remaining_wals(relay->r, &relay->stream, NULL,
-				       (msg->events & WAL_EVENT_ROTATE) != 0);
+				       (events & WAL_EVENT_ROTATE) != 0);
 	} catch (Exception *e) {
 		e->log();
 		diag_move(diag_get(), &relay->diag);
@@ -507,8 +504,7 @@ relay_subscribe_f(va_list ap)
 	};
 	trigger_add(&r->on_close_log, &on_close_log);
 	wal_set_watcher(&relay->wal_watcher, cord_name(cord()),
-			relay_process_wal_event, cbus_process,
-			WAL_EVENT_WRITE | WAL_EVENT_ROTATE);
+			relay_process_wal_event, cbus_process);
 
 	relay_set_cord_name(relay->io.fd);
 
@@ -635,12 +631,16 @@ relay_subscribe(struct replica *replica, int fd, uint64_t sync,
 static void
 relay_send(struct relay *relay, struct xrow_header *packet)
 {
+	struct errinj *inj = errinj(ERRINJ_RELAY_SEND_DELAY, ERRINJ_BOOL);
+	while (inj != NULL && inj->bparam)
+		fiber_sleep(0.01);
+
 	packet->sync = relay->sync;
 	relay->last_row_tm = ev_monotonic_now(loop());
 	coio_write_xrow(&relay->io, packet);
 	fiber_gc();
 
-	struct errinj *inj = errinj(ERRINJ_RELAY_TIMEOUT, ERRINJ_DOUBLE);
+	inj = errinj(ERRINJ_RELAY_TIMEOUT, ERRINJ_DOUBLE);
 	if (inj != NULL && inj->dparam > 0)
 		fiber_sleep(inj->dparam);
 }

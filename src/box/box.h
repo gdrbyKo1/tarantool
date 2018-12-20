@@ -124,11 +124,6 @@ box_wait_ro(bool ro, double timeout);
 void
 box_set_orphan(bool orphan);
 
-/** True if snapshot is in progress. */
-extern bool box_checkpoint_is_in_progress;
-/** Incremented with each next snapshot. */
-extern uint32_t snapshot_version;
-
 /**
  * Iterate over all spaces and save them to the
  * snapshot file.
@@ -199,6 +194,8 @@ void box_set_snap_io_rate_limit(void);
 void box_set_too_long_threshold(void);
 void box_set_readahead(void);
 void box_set_checkpoint_count(void);
+void box_set_checkpoint_interval(void);
+void box_set_checkpoint_wal_threshold(void);
 void box_set_memtx_memory(void);
 void box_set_memtx_max_tuple_size(void);
 void box_set_vinyl_memory(void);

@@ -88,7 +88,7 @@ local function _getpw(uid)
     elseif type(uid) == 'string' then
         pw = ffi.C.getpwnam(uid)
     else
-        error("Bad type of uid (expected 'string'/'number')", 2)
+        error("Bad type of uid (expected 'string'/'number')")
     end
     return pw
 end
@@ -101,12 +101,12 @@ local function _getgr(gid)
     elseif type(gid) == 'string' then
         gr = ffi.C.getgrnam(gid)
     else
-        error("Bad type of gid (expected 'string'/'number')", 2)
+        error("Bad type of gid (expected 'string'/'number')")
     end
     return gr
 end
 
-local pwgr_errstr = "get%s* failed [errno %d]: %s"
+local pwgr_errstr = "get%s failed [errno %d]: %s"
 
 local function getgr(gid)
     if gid == nil then
@@ -115,7 +115,7 @@ local function getgr(gid)
     local gr = _getgr(gid)
     if gr == nil then
         if errno() ~= 0 then
-            error(pwgr_errstr:format('pw', errno(), errno.strerror()), 2)
+            error(pwgr_errstr:format('gr', errno(), errno.strerror()))
         end
         return nil
     end
@@ -144,7 +144,7 @@ local function getpw(uid)
     local pw = _getpw(uid)
     if pw == nil then
         if errno() ~= 0 then
-            error(pwgr_errstr:format('pw', errno(), errno.strerror()), 2)
+            error(pwgr_errstr:format('pw', errno(), errno.strerror()))
         end
         return nil
     end
@@ -159,44 +159,38 @@ local function getpw(uid)
 end
 
 local function getpwall()
-    errno(0)
     ffi.C.setpwent()
-    if errno() ~= 0 then
-        return nil
-    end
     local pws = {}
     while true do
+        errno(0)
         local pw = ffi.C.getpwent()
         if pw == nil then
+            if errno() ~= 0 then
+                error(pwgr_errstr:format('pwall', errno(), errno.strerror()))
+            end
             break
         end
         table.insert(pws, getpw(pw.pw_uid))
     end
     ffi.C.endpwent()
-    if errno() ~= 0 then
-        return nil
-    end
     return pws
 end
 
 local function getgrall()
-    errno(0)
     ffi.C.setgrent()
-    if errno() ~= 0 then
-        return nil
-    end
     local grs = {}
     while true do
+        errno(0)
         local gr = ffi.C.getgrent()
         if gr == nil then
+            if errno() ~= 0 then
+                error(pwgr_errstr:format('grall', errno(), errno.strerror()))
+            end
             break
         end
         table.insert(grs, getpw(gr.gr_gid))
     end
     ffi.C.endgrent()
-    if errno() ~= 0 then
-        return nil
-    end
     return grs
 end
 

@@ -134,18 +134,46 @@ test:test("fromhex", function(test)
 end)
 
 test:test("strip", function(test)
-    test:plan(6)
+    test:plan(21)
     local str = "  hello hello "
-    test:is(string.len(string.strip(str)), 11, "strip")
-    test:is(string.len(string.lstrip(str)), 12, "lstrip")
-    test:is(string.len(string.rstrip(str)), 13, "rstrip")
+    test:is(string.len(string.strip(str)), 11, "strip (no chars)")
+    test:is(string.len(string.lstrip(str)), 12, "lstrip (no chars)")
+    test:is(string.len(string.rstrip(str)), 13, "rstrip (no chars)")
     local _, err = pcall(string.strip, 12)
-    test:ok(err and err:match("%(string expected, got number%)"))
+    test:ok(err and err:match("#1 to '.-%.strip' %(string expected, got number%)"))
     _, err = pcall(string.lstrip, 12)
-    test:ok(err and err:match("%(string expected, got number%)"))
+    test:ok(err and err:match("#1 to '.-%.lstrip' %(string expected, got number%)"))
     _, err = pcall(string.rstrip, 12)
-    test:ok(err and err:match("%(string expected, got number%)"))
-end )
+    test:ok(err and err:match("#1 to '.-%.rstrip' %(string expected, got number%)"))
+    
+    str = "www.example.com/foo"
+    local chars = "w./fomc"
+    test:is(string.len(string.strip(str, chars)), 7, "strip (chars)")
+    test:is(string.len(string.lstrip(str, chars)), 15, "lstrip (chars)")
+    test:is(string.len(string.rstrip(str, chars)), 11, "rstrip (chars)")
+    
+    str, chars = "^$()%.[]*+-?BEEP^$()%.[]*+-?%", "^$()%.[]*+-?"
+    test:is(string.len(string.strip(str, chars)), 4, "strip (magic chars)")
+    test:is(string.len(string.lstrip(str, chars)), 17, "lstrip (magic chars)")
+    test:is(string.len(string.rstrip(str, chars)), 16, "rstrip (magic chars)")
+    
+    str, chars = "\0\00\000HELLO\000\00\0\0", "\0"
+    test:is(string.len(string.strip(str, chars)), 5, "strip (chars with embedded 0s)")
+    test:is(string.len(string.lstrip(str, chars)), 9, "lstrip (chars with embedded 0s)")
+    test:is(string.len(string.rstrip(str, chars)), 8, "rstrip (chars with embedded 0s)")
+    
+    str, chars = " test ", ""
+    test:is(string.strip(str, chars), str, "strip (0-length chars)")
+    test:is(string.lstrip(str, chars), str, "lstrip (0-length chars)")
+    test:is(string.rstrip(str, chars), str, "rstrip (0-length chars)")
+    
+    _, err = pcall(string.strip, 'foo', 12)
+    test:ok(err and err:match("#2 to '.-%.strip' %(string expected, got number%)"))
+    _, err = pcall(string.lstrip, 'bar', 12)
+    test:ok(err and err:match("#2 to '.-%.lstrip' %(string expected, got number%)"))
+    _, err = pcall(string.rstrip, 'baz', 12)
+    test:ok(err and err:match("#2 to '.-%.rstrip' %(string expected, got number%)"))
+end)
 
 test:test("unicode", function(test)
     test:plan(104)

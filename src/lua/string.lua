@@ -339,25 +339,64 @@ local function string_fromhex(inp)
     return ffi.string(res, len)
 end
 
-local function string_strip(inp)
+local function string_strip(inp, chars)
     if type(inp) ~= 'string' then
         error(err_string_arg:format(1, "string.strip", 'string', type(inp)), 2)
     end
-    return (string.gsub(inp, "^%s*(.-)%s*$", "%1"))
+    if chars == nil then
+        return (string.gsub(inp, "^%s*(.-)%s*$", "%1"))
+    end
+    
+    if type(chars) ~= 'string' then
+        error(err_string_arg:format(2, "string.strip", 'string', type(chars)), 2)
+    end
+    if chars == '' then
+        return inp
+    end
+    
+    chars = chars:gsub('[%^%$%(%)%%%.%[%]%*%+%-%?]', "%%%0"):gsub('%z+', '%%z')
+    local pattern = string.format("^[%s]*(.-)[%s]*$", chars, chars)
+    return (string.gsub(inp, pattern, "%1"))
 end
 
-local function string_lstrip(inp)
+local function string_lstrip(inp, chars)
     if type(inp) ~= 'string' then
         error(err_string_arg:format(1, "string.lstrip", 'string', type(inp)), 2)
     end
-    return (string.gsub(inp, "^%s*(.-)", "%1"))
+    if chars == nil then
+        return (string.gsub(inp, "^%s*(.-)", "%1"))
+    end
+    
+    if type(chars) ~= 'string' then
+        error(err_string_arg:format(2, "string.lstrip", 'string', type(chars)), 2)
+    end
+    if chars == '' then
+        return inp
+    end
+    
+    chars = chars:gsub('[%^%$%(%)%%%.%[%]%*%+%-%?]', "%%%0"):gsub('%z+', '%%z')
+    local pattern = string.format("^[%s]*(.-)", chars)
+    return (string.gsub(inp, pattern, "%1"))
 end
 
-local function string_rstrip(inp)
+local function string_rstrip(inp, chars)
     if type(inp) ~= 'string' then
         error(err_string_arg:format(1, "string.rstrip", 'string', type(inp)), 2)
     end
-    return (string.gsub(inp, "(.-)%s*$", "%1"))
+    if chars == nil then
+        return (string.gsub(inp, "(.-)%s*$", "%1"))
+    end
+    
+    if type(chars) ~= 'string' then
+        error(err_string_arg:format(2, "string.rstrip", 'string', type(chars)), 2)
+    end
+    if chars == '' then
+        return inp
+    end
+    
+    chars = chars:gsub('[%^%$%(%)%%%.%[%]%*%+%-%?]', "%%%0"):gsub('%z+', '%%z')
+    local pattern = string.format("(.-)[%s]*$", chars)
+    return (string.gsub(inp, pattern, "%1"))
 end
 
 
